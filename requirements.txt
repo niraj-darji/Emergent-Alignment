@@ -1,3 +1,4 @@
 inspect-ai 
 inspect_evals 
 vllm
+huggingface_hub
