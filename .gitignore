@@ -1,2 +1,7 @@
 .env
 .venv/
+logs/
+.cache/
+__pycache__/
+*.pyc
+checkpoints/

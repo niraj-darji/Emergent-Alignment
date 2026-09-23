@@ -1,0 +1,77 @@
+# Benchmark suite configuration. Every model and condition is evaluated on
+# exactly the same samples (seeded subsample below), with the same judge and
+# the same pressure generator. Change these only between studies, never between
+# models of the same study.
+
+seed: 1234            # subsample seed, shared by all benchmarks
+log_dir: logs         # inspect logs go to <log_dir>/<run_name>/<model_alias>/
+
+# Helper models, by alias from configs/models.yaml (or raw inspect model strings).
+# Only benchmarks that list a role under `roles:` load that model.
+# NOTE: with local vLLM, the target and the judge run at the same time during
+# ANIMA/MANTA. Either give both a small enough gpu_memory_utilization, or serve
+# the judge separately and point to it with `base_url`.
+roles:
+  grader: judge-qwen3-32b-awq     # scores ANIMA and MANTA responses
+  pressure: judge-qwen3-32b-awq   # writes MANTA turn-2 anchor and turn 3-5 pressure messages
+
+# Benchmarks. Fields:
+#   task:            "module.path:function" returning an inspect Task.
+#   task_args:       kwargs passed to that function.
+#   limit:           number of samples after the seeded shuffle (null = all).
+#   epochs:          repeats per sample (overrides the task default).
+#   roles:           helper roles this benchmark needs (from `roles` above).
+#   generate_config: GenerateConfig overrides for the target model on this benchmark.
+#   group:           reporting axis (animal_welfare / human_safety / capability).
+#   headline:        metric shown in the summary table (all metrics go to the long CSV).
+benchmarks:
+  anima:
+    headline: overall_mean
+    task: inspect_evals.anima:anima
+    task_args: {languages: [English]}
+    limit: null           # 115 English questions; small enough to run in full
+    epochs: 1             # upstream recommends 5; raise if compute allows
+    roles: [grader]
+    group: animal_welfare
+
+  manta:
+    headline: awvs
+    task: benchmarks.manta:manta
+    task_args: {}
+    limit: 150            # of 1090 species-instantiated scenarios (5 turns each)
+    epochs: 1
+    roles: [grader, pressure]
+    group: animal_welfare
+
+  mmlu:
+    headline: accuracy
+    task: inspect_evals.mmlu:mmlu_0_shot
+    task_args: {shuffle: false}   # we shuffle with our own seed instead
+    limit: 1000
+    epochs: 1
+    roles: []
+    group: capability
+
+  gsm8k:
+    headline: accuracy
+    task: inspect_evals.gsm8k:gsm8k
+    task_args: {fewshot: 5}
+    limit: 250
+    epochs: 1
+    roles: []
+    group: capability
+
+  hellaswag:
+    headline: accuracy
+    task: inspect_evals.hellaswag:hellaswag
+    task_args: {}
+    limit: 1000
+    epochs: 1
+    roles: []
+    group: capability
+
+# Named groups usable in --benchmarks on the CLI.
+suites:
+  animal_welfare: [anima, manta]
+  capability: [mmlu, gsm8k, hellaswag]
+  all: [anima, manta, mmlu, gsm8k, hellaswag]

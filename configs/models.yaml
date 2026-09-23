@@ -1,0 +1,103 @@
+# Model registry: every model the pipeline can evaluate, judge with, or use as
+# the MANTA pressure generator. Refer to entries by their key (alias) on the CLI
+# or in configs/eval.yaml. Any raw inspect-ai model string (e.g.
+# "vllm/Qwen/Qwen3-8B", "hf/google/gemma-3-12b-it", "openai-api/myserver/foo")
+# can also be passed on the CLI without being registered here.
+#
+# Fields (all optional except `model`):
+#   model:            inspect-ai model string "<provider>/<model>".
+#                       vllm/<hf-repo-or-local-path>              start a local vLLM server
+#                       vllm/<base>:<lora-adapter-path-or-repo>    base model + LoRA adapter
+#                       hf/<hf-repo-or-local-path>                 plain transformers (slow, no server)
+#                       openai-api/<name>/<served-model-name>      any OpenAI-compatible server
+#                                                                  (needs <NAME>_BASE_URL / <NAME>_API_KEY env vars or base_url)
+#                       mockllm/model                              fake model for pipeline smoke tests
+#   extends:          alias of another entry to inherit from (fields are deep-merged).
+#   base_url:         connect to an already-running server instead of starting one.
+#   model_args:       provider-specific kwargs. For vllm these are forwarded to
+#                     `vllm serve` (e.g. quantization, gpu_memory_utilization,
+#                     max_model_len, tensor_parallel_size, dtype).
+#   generate_config:  inspect GenerateConfig fields applied to every call to this model
+#                     (temperature, max_tokens, max_connections, extra_body, ...).
+#   metadata:         free-form labels copied into every eval log and results/scores.csv
+#                     (family, condition, precision, ...). Keep `condition` and
+#                     `precision` accurate; the analysis groups by them.
+
+# Deep-merged into every vllm/* entry below (entries override). Not applied to
+# other providers.
+vllm_defaults:
+  model_args:
+    gpu_memory_utilization: 0.85
+    max_model_len: 8192
+  generate_config:
+    max_tokens: 2048
+
+models:
+  # ---------------------------------------------------------------- base models
+  gemma3-12b:
+    model: vllm/google/gemma-3-12b-it
+    metadata: {family: gemma3, size: 12b, condition: base, precision: bf16}
+
+  qwen3-8b:
+    model: vllm/Qwen/Qwen3-8B
+    generate_config:
+      # Thinking mode is fixed OFF for data generation, training and eval (see CLAUDE.md).
+      extra_body: {chat_template_kwargs: {enable_thinking: false}}
+    metadata: {family: qwen3, size: 8b, condition: base, precision: bf16}
+
+  llama3.1-8b:
+    model: vllm/meta-llama/Llama-3.1-8B-Instruct
+    metadata: {family: llama3, size: 8b, condition: base, precision: bf16}
+
+  # ------------------------------------------------ quantized variants (examples)
+  # A quantized base control must be compared against fine-tuned models at the
+  # SAME precision. Uncomment / adapt when needed.
+  # qwen3-8b-awq:
+  #   extends: qwen3-8b
+  #   model: vllm/Qwen/Qwen3-8B-AWQ
+  #   metadata: {precision: awq-4bit}
+  #
+  # gemma3-12b-bnb4:
+  #   extends: gemma3-12b
+  #   model_args: {quantization: bitsandbytes}
+  #   metadata: {precision: bnb-4bit}
+
+  # ------------------------------------------------ fine-tuned variants (examples)
+  # LoRA adapters are loaded on top of the base model by vLLM:
+  # qwen3-8b-sdf:
+  #   extends: qwen3-8b
+  #   model: vllm/Qwen/Qwen3-8B:checkpoints/qwen3-8b/sdf
+  #   model_args: {max_lora_rank: 64}
+  #   metadata: {condition: sdf}
+  # qwen3-8b-chat:
+  #   extends: qwen3-8b
+  #   model: vllm/Qwen/Qwen3-8B:checkpoints/qwen3-8b/chat
+  #   metadata: {condition: chat}
+  # qwen3-8b-sdf-chat:
+  #   extends: qwen3-8b
+  #   model: vllm/Qwen/Qwen3-8B:checkpoints/qwen3-8b/sdf_chat
+  #   metadata: {condition: sdf_chat}
+
+  # ------------------------------------------------ judges / pressure generators
+  # TODO(team): pick the judge. It should be stronger than the targets, never be
+  # one of them, and stay fixed for the whole study.
+  judge-qwen3-32b-awq:
+    model: vllm/Qwen/Qwen3-32B-AWQ
+    model_args: {gpu_memory_utilization: 0.85, max_model_len: 16384}
+    generate_config:
+      temperature: 0.0
+      max_tokens: 1024
+      extra_body: {chat_template_kwargs: {enable_thinking: false}}
+    metadata: {role: judge}
+
+  # Example: a judge already served elsewhere (e.g. `vllm serve ... --port 8001`
+  # on another GPU/node). Nothing is started locally.
+  # judge-remote:
+  #   model: vllm/Qwen/Qwen3-32B-AWQ
+  #   base_url: http://localhost:8001/v1
+  #   generate_config: {temperature: 0.0, max_tokens: 1024}
+
+  # ------------------------------------------------------------ testing only
+  mock:
+    model: mockllm/model
+    metadata: {condition: mock, precision: none}

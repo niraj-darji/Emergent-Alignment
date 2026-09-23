@@ -69,11 +69,20 @@ All benchmarks are subsampled to fit the compute budget. Use **fixed subsample s
 
 | Axis | Benchmarks | Notes | Lead |
 |------|-----------|-------|------|
-| Animal welfare | AnimalHarmBench (Kanepajs et al. 2025), MANTA (Luong et al. 2026, 5-turn adversarial) | LLM-as-judge with a **local** judge model; small MANTA subset | Jevin |
+| Animal welfare | ANIMA (Brazilek & Tidmarsh 2026; formerly "AHB"), MANTA (Luong et al. 2026, 5-turn adversarial) | LLM-as-judge with a **local** judge model; small MANTA subset | Jevin |
 | Human safety / bias | BBQ, Anthropic model-written evals (sycophancy, power-seeking…), HHH (Askell et al. 2021), ToxiGen | ToxiGen scored with a **local toxicity classifier**, no external API | Jevin |
 | Capability | MMLU, HellaSwag, GSM8K | Checks that capability did not drop | Niraj |
 
-Tooling: `inspect-ai` and `inspect_evals` (in `requirements.txt`), served with `vllm`. Key analysis: **do animal-welfare gains correlate with human-safety gains across conditions, and does any condition avoid capability loss?**
+**ANIMA is not AnimalHarmBench.** The proposal names AnimalHarmBench (Kanepajs et al. 2025). We use ANIMA instead, the benchmark from the paper we extend, which makes our results directly comparable to it. Say so in the mid-term report and fix the citation.
+
+**Pipeline (implemented):** `benchmarks/` + `configs/`. See `benchmarks/README.md`.
+- Models are pluggable: any inspect model string or an alias in `configs/models.yaml` (vLLM, LoRA adapters via `vllm/<base>:<adapter>`, quantized checkpoints, remote servers). Don't hard-code model IDs in code.
+- Benchmarks, seed, subsample sizes and the judge (`grader`) / MANTA pressure (`pressure`) roles live in `configs/eval.yaml`. New benchmarks (BBQ, ToxiGen, …) are added there.
+- Run: `python -m benchmarks.run --models <aliases> --run-name <name>`, then `python -m benchmarks.summarize --run-name <name>`. Smoke test without a GPU: `--models mock --grader mock --pressure mock --limit 3`.
+- MANTA is our port (not in inspect_evals). Prompts are fetched from the upstream repo at a pinned commit because it has no license. Our MANTA numbers compare only within this study (different judge and pressure models than the paper).
+- Local GPU is a 6 GB GTX 1660 Ti: too small for 8–12B models. Real runs need a bigger GPU or cluster.
+
+Tooling: `inspect-ai` and `inspect_evals` (pinned in `requirements.txt`), served with `vllm`. Key analysis: **do animal-welfare gains correlate with human-safety gains across conditions, and does any condition avoid capability loss?**
 
 ## 5. Timeline (2026)
 
@@ -92,7 +101,7 @@ Going over a report's page limit costs 2 grades. The rubric is in `Reports/READM
 Current:
 ```
 CLAUDE.md                     # this file
-requirements.txt              # inspect-ai, inspect_evals, vllm, huggingface_hub
+requirements.txt              # pinned inspect-ai / inspect_evals, vllm, etc.
 list-of-useful-commands.txt   # uv env setup + HF model download commands
 .env.example                  # env vars template (HF_TOKEN etc.) — real .env is gitignored
 Reports/                      # LaTeX report (course template)
@@ -102,14 +111,21 @@ Reports/                      # LaTeX report (course template)
   proposal/Final_Proposal_Ethics.pdf
 ```
 
-Proposed layout for code (create folders as they are needed and update this section when they change):
+Code:
+```
+configs/models.yaml   # model registry (base, LoRA, quantized, judges) — the one place for model IDs
+configs/eval.yaml     # benchmarks, seed, subsample sizes, grader/pressure roles
+benchmarks/           # run.py (CLI), summarize.py, config.py, manta/ (MANTA port); README.md
+logs/                 # inspect logs (gitignored); view with `inspect view --log-dir logs/<run>`
+results/<run>/        # summary.csv + scores_long.csv (committed)
+```
+
+Planned (create as needed and update this section):
 ```
 constitution/     # animal-welfare constitution (markdown) — versioned
 data_gen/         # docs + chat generation pipelines, prompts, filtering/dedup
 data/             # generated datasets (large files gitignored; publish to HF Hub)
 training/         # LoRA fine-tuning scripts + configs per model × condition
-eval/             # inspect-ai tasks, judge/classifier configs, subsample seeds
-results/          # score tables (CSV/JSON), plots
 ```
 
 ## 7. Environment and commands
@@ -141,6 +157,6 @@ cd Reports && make       # pdflatex + bibtex
 ## 9. Open questions / to decide
 
 - Exact Qwen3 size and Llama 3.x variant (defaults in §3), and whether/when to switch to quantized models.
-- Which local model generates the data, and which local judge scores AnimalHarmBench/MANTA.
+- Which local model generates the data, and which local judge scores ANIMA/MANTA and writes MANTA's pressure turns (placeholder: `judge-qwen3-32b-awq` in `configs/models.yaml`). It must stay fixed for the whole study, and running it next to the target needs GPU memory planning.
 - Dataset sizes per condition, and whether to add a check that follows Brazilek & Tidmarsh: does the gain survive later unrelated instruction tuning?
 - LoRA hyperparameters, and the training framework (e.g. TRL/PEFT; it is not yet in `requirements.txt`).
