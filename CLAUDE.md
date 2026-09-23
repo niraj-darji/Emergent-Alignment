@@ -32,7 +32,20 @@ A negative or mixed result still counts as a result. Report it honestly and neve
 
 ## 3. Experimental design
 
-**Models** (PEFT/LoRA only, because compute is limited). The proposal lists Gemma 2 (2B/9B), Gemma 3 and Qwen 2.5. `list-of-useful-commands.txt` currently downloads `google/gemma-3-12b-it`, `Qwen/Qwen2.5-7B-Instruct` and `meta-llama/Llama-3.1-8B-Instruct`. **Confirm the final model list with the user before hard-coding it.** Start with the smallest model to test the pipeline end to end, then scale up.
+**Models** (decided 2026-09-23; this replaces the proposal's Gemma 2 / Gemma 3 / Qwen 2.5 list, so note the change in the mid-term report):
+| Family | HF repo (default) | Gated? |
+|--------|-------------------|--------|
+| Gemma 3 12B | `google/gemma-3-12b-it` | yes (accept license) |
+| Qwen3 | `Qwen/Qwen3-8B` (size not fixed yet; 8B matches the others) | no |
+| Llama 3 | `meta-llama/Llama-3.1-8B-Instruct` (exact 3.x variant not fixed yet) | yes (accept license) |
+
+Fine-tuning uses PEFT/LoRA only, because compute is limited. Start with the smallest model to test the pipeline end to end, then scale up. Keep model IDs in one config file, not hard-coded across scripts.
+
+**Quantization (may be used later):** the team may switch to quantized versions (e.g. 4-bit QLoRA with bitsandbytes for training, AWQ/GPTQ/FP8 checkpoints for vLLM inference) if memory is tight. Rules if we do:
+- Make precision a config option (`load_in_4bit`, `quantization`, etc.) from the start, so switching needs no code changes.
+- Record the precision/quant method with every checkpoint and score. The base control must be evaluated **at the same precision** as its fine-tuned variants, or the comparison is confounded.
+- Quantization can shift benchmark scores by itself, so if it is used, run at least one full-precision vs quantized base-model check and report the gap.
+- Qwen3 has a thinking mode (`enable_thinking`). Fix it to one setting (default: off) for data generation, training and eval.
 
 **Conditions per model:**
 | ID | Condition | Description |
@@ -108,7 +121,7 @@ uv pip install -r requirements.txt
 
 # Gated models (Gemma, Llama) need license acceptance + HF read token
 hf auth login            # or: huggingface-cli login
-hf download Qwen/Qwen2.5-7B-Instruct --local-dir <dir>
+hf download Qwen/Qwen3-8B --local-dir <dir>
 
 # Build the report
 cd Reports && make       # pdflatex + bibtex
@@ -127,7 +140,7 @@ cd Reports && make       # pdflatex + bibtex
 
 ## 9. Open questions / to decide
 
-- Final model list (proposal vs the download commands in the repo; see §3).
+- Exact Qwen3 size and Llama 3.x variant (defaults in §3), and whether/when to switch to quantized models.
 - Which local model generates the data, and which local judge scores AnimalHarmBench/MANTA.
 - Dataset sizes per condition, and whether to add a check that follows Brazilek & Tidmarsh: does the gain survive later unrelated instruction tuning?
 - LoRA hyperparameters, and the training framework (e.g. TRL/PEFT; it is not yet in `requirements.txt`).
