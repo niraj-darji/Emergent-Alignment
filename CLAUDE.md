@@ -41,7 +41,7 @@ A negative or mixed result still counts as a result. Report it honestly and neve
 
 Fine-tuning uses PEFT/LoRA only, because compute is limited. Start with the smallest model to test the pipeline end to end, then scale up. Keep model IDs in one config file, not hard-coded across scripts.
 
-**Quantization (may be used later):** the team may switch to quantized versions (e.g. 4-bit QLoRA with bitsandbytes for training, AWQ/GPTQ/FP8 checkpoints for vLLM inference) if memory is tight. Rules if we do:
+**Quantization:** the concrete plan for our hardware (RTX 4090 24 GB + RTX 5090 32 GB) is in `material/quantization-strategy.md`: 8B targets in bf16, Gemma-3-12B in NF4/QLoRA, and the `gpt-oss-20b` judge served from the 5090. Targets use `max_model_len: 16384`, the judge 32768 and the generator 8192 (§11 of that file). General rules:
 - Make precision a config option (`load_in_4bit`, `quantization`, etc.) from the start, so switching needs no code changes.
 - Record the precision/quant method with every checkpoint and score. The base control must be evaluated **at the same precision** as its fine-tuned variants, or the comparison is confounded.
 - Quantization can shift benchmark scores by itself, so if it is used, run at least one full-precision vs quantized base-model check and report the gap.
@@ -157,6 +157,6 @@ cd Reports && make       # pdflatex + bibtex
 ## 9. Open questions / to decide
 
 - Exact Qwen3 size and Llama 3.x variant (defaults in §3), and whether/when to switch to quantized models.
-- Which local model generates the data, and which local judge scores ANIMA/MANTA and writes MANTA's pressure turns (placeholder: `judge-qwen3-32b-awq` in `configs/models.yaml`). It must stay fixed for the whole study, and running it next to the target needs GPU memory planning.
+- Judge and generator are **decided (2026-09-25)**: judge + MANTA pressure = `openai/gpt-oss-20b` (`judge-remote` / `judge-gptoss-20b`), generator = `Intel/Mistral-Small-3.2-24B-Instruct-2506-int4-AutoRound` (`generator-mistral-small`). Both are pinned to a revision in `configs/models.yaml`, from non-target families, and frozen for the study. Still open: the smoke test of gpt-oss's MANTA pushback, and whether there's time for a small human-agreement check (strategy §12.3–12.4).
 - Dataset sizes per condition, and whether to add a check that follows Brazilek & Tidmarsh: does the gain survive later unrelated instruction tuning?
 - LoRA hyperparameters, and the training framework (e.g. TRL/PEFT; it is not yet in `requirements.txt`).
