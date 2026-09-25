@@ -12,8 +12,9 @@ log_dir: logs         # inspect logs go to <log_dir>/<run_name>/<model_alias>/
 # ANIMA/MANTA. Either give both a small enough gpu_memory_utilization, or serve
 # the judge separately and point to it with `base_url`.
 roles:
-  grader: judge-qwen3-32b-awq     # scores ANIMA and MANTA responses
-  pressure: judge-qwen3-32b-awq   # writes MANTA turn-2 anchor and turn 3-5 pressure messages
+  grader: judge-remote     # gpt-oss-20b on the 5090; scores ANIMA and MANTA responses
+  pressure: judge-remote   # writes MANTA turn-2 anchor and turn 3-5 pressure messages
+  # Single machine instead? Pass --grader judge-gptoss-20b --pressure judge-gptoss-20b.
 
 # Benchmarks. Fields:
 #   task:            "module.path:function" returning an inspect Task.

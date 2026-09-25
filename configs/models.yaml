@@ -28,7 +28,11 @@
 vllm_defaults:
   model_args:
     gpu_memory_utilization: 0.85
-    max_model_len: 8192
+    # Prompt + response tokens per request, not response length (that is max_tokens).
+    # 16384 covers MANTA's worst case (5 replies x 2048 + user turns ~ 11.7k).
+    # Keep it identical for every target and condition. See
+    # material/quantization-strategy.md section 11.
+    max_model_len: 16384
   generate_config:
     max_tokens: 2048
 
@@ -79,23 +83,51 @@ models:
   #   metadata: {condition: sdf_chat}
 
   # ------------------------------------------------ judges / pressure generators
-  # TODO(team): pick the judge. It should be stronger than the targets, never be
-  # one of them, and stay fixed for the whole study.
-  judge-qwen3-32b-awq:
-    model: vllm/Qwen/Qwen3-32B-AWQ
-    model_args: {gpu_memory_utilization: 0.85, max_model_len: 16384}
+  # Judge + MANTA pressure: gpt-oss-20b (OpenAI family, not a target family).
+  # Frozen for the whole study: model, revision, reasoning effort, temperature.
+  # See material/quantization-strategy.md section 12.
+  judge-gptoss-20b:
+    # Starts its own vLLM server. Use on a single machine (e.g. with Gemma nf4 on the 5090).
+    model: vllm/openai/gpt-oss-20b
+    model_args:
+      revision: 6cee5e81ee83917806bbde320786a8fb61efebee
+      gpu_memory_utilization: 0.45
+      max_model_len: 32768   # whole MANTA conversation (~12k) + rubric + reasoning
     generate_config:
       temperature: 0.0
-      max_tokens: 1024
-      extra_body: {chat_template_kwargs: {enable_thinking: false}}
-    metadata: {role: judge}
+      reasoning_effort: medium
+      max_tokens: 4096       # reasoning tokens count toward this
+    metadata: {role: judge, family: gpt-oss, precision: mxfp4}
 
-  # Example: a judge already served elsewhere (e.g. `vllm serve ... --port 8001`
-  # on another GPU/node). Nothing is started locally.
-  # judge-remote:
-  #   model: vllm/Qwen/Qwen3-32B-AWQ
-  #   base_url: http://localhost:8001/v1
-  #   generate_config: {temperature: 0.0, max_tokens: 1024}
+  judge-remote:
+    # The same judge, served on the 5090 and reached through an SSH tunnel
+    # (strategy section 3). Nothing is started locally, so vllm_defaults and
+    # model_args don't apply: start the server with
+    #   vllm serve openai/gpt-oss-20b --revision 6cee5e81ee83917806bbde320786a8fb61efebee \
+    #     --host 127.0.0.1 --port 8001 --gpu-memory-utilization 0.92 --max-model-len 32768
+    # Keep generate_config and metadata identical to judge-gptoss-20b. Not `extends`,
+    # because inherited server args (gpu_memory_utilization, ...) can't be cleared.
+    model: vllm/openai/gpt-oss-20b
+    base_url: http://localhost:8001/v1
+    generate_config:
+      temperature: 0.0
+      reasoning_effort: medium
+      max_tokens: 4096
+    metadata: {role: judge, family: gpt-oss, precision: mxfp4}
+
+  # ------------------------------------------------------------ data generation
+  # Not a target family and not the judge (strategy section 13). Intel's 4-bit
+  # AutoRound build: only the language layers are quantized, and images are disabled.
+  generator-mistral-small:
+    model: vllm/Intel/Mistral-Small-3.2-24B-Instruct-2506-int4-AutoRound
+    model_args:
+      revision: 21907bf9a442ec05c91e059ef17b08a8b44983f5
+      language_model_only: true
+      max_model_len: 8192    # constitution (~1.5-4k) + instructions + output (<= 2048)
+    generate_config:
+      temperature: 0.8
+      max_tokens: 2048
+    metadata: {role: generator, family: mistral, precision: int4-autoround}
 
   # ------------------------------------------------------------ testing only
   mock:
