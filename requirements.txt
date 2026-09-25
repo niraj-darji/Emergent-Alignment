@@ -1,4 +1,9 @@
-inspect-ai 
-inspect_evals 
+# Benchmark versions are pinned: scores are only comparable across runs made
+# with the same inspect-ai / inspect_evals versions.
+inspect-ai==0.3.268
+inspect_evals[anima]==0.21.0
 vllm
 huggingface_hub
+pyyaml
+python-dotenv
+numpy
