@@ -166,5 +166,7 @@ def load_env() -> None:
         load_dotenv(REPO_ROOT / ".env")
     except ImportError:
         pass
-    if not os.environ.get("HF_TOKEN") and os.environ.get("HF_TOKEN_VALUE"):
+    # The token in this repo's .env wins over a shell HF_TOKEN or a saved `hf auth login`
+    # (on shared machines those can belong to someone else).
+    if os.environ.get("HF_TOKEN_VALUE"):
         os.environ["HF_TOKEN"] = os.environ["HF_TOKEN_VALUE"]
