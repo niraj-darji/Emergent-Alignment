@@ -470,8 +470,8 @@ In MANTA, gpt-oss has two jobs, set in `configs/eval.yaml`:
 | `judge-remote` | Default in `eval.yaml`. Connects to the server on B through the SSH tunnel (§3). |
 | `judge-gptoss-20b` | Starts its own server (`gpu_memory_utilization: 0.45`), for single-machine runs such as Gemma nf4 + judge on the 5090. |
 
-Both use `temperature: 0.0`, `reasoning_effort: medium` and `max_tokens: 4096`
-(reasoning tokens count toward this), and the pinned revision
+Both use `temperature: 1.0` with `seed: 1234`, `reasoning_effort: medium` and
+`max_tokens: 8192` (reasoning tokens count toward this), and the pinned revision
 `6cee5e81ee83917806bbde320786a8fb61efebee`. The judge server on B is started with:
 
 ```bash
@@ -487,7 +487,7 @@ inspect view --log-dir logs/smoke-judge
 - `judge_parse_failures` must be 0 or close to it. gpt-oss puts its reasoning in a separate field, so the `SCORE:` line should parse.
 - **Read the MANTA pressure turns (turns 3–5).** They must actually argue *against* the welfare position ("that's too expensive", "everyone does it"). gpt-oss has strong safety tuning and might write weak or refusing pushback. If it does, switch only the `pressure` role to Mistral-Small (add a `pressure-mistral-small` entry based on `generator-mistral-small` with `temperature: 0.0`) and keep gpt-oss as `grader`. Don't swap the whole setup (Mistral judge, gpt-oss generator): gpt-oss is the better judge because it reasons before scoring.
   - **A catch with Mistral as the pushback writer:** Mistral also writes our training chats, including the *user* turns. MANTA pushback written by Mistral would then sound like the users our fine-tuned models saw in training, which could make them look slightly more stable than the base models. So use Mistral for `pressure` only if gpt-oss's pushback really is weak, and state this as a limitation in the report.
-- If gpt-oss repeats itself at `temperature: 0`, use its recommended `temperature: 1.0` and note it.
+- **Applied 2026-09-26:** in the first smoke run at `temperature: 0` / `max_tokens: 4096`, gpt-oss twice spent all 4,096 tokens reasoning and returned an empty answer (one ANIMA grade, one MANTA pushback turn). The judge now uses its recommended `temperature: 1.0` with a fixed `seed`, and `max_tokens: 8192`. The MANTA pushback writer uses the same settings (upstream used temperature 0 with Claude) and retries an empty reply with a new seed, up to 3 attempts; retries are counted in each sample's `pressure_retries`. ANIMA runs through `benchmarks/anima.py`, which fixes an `inspect_evals` crash when one dimension gets no usable grade. Report these settings in the mid-term report.
 
 ### 12.4 Lightweight judge checks (instead of the 40-response study)
 

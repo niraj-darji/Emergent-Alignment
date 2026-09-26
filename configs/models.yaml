@@ -111,9 +111,13 @@ models:
       gpu_memory_utilization: 0.45
       max_model_len: 32768   # whole MANTA conversation (~12k) + rubric + reasoning
     generate_config:
-      temperature: 0.0
+      # gpt-oss's recommended sampling. At temperature 0 it sometimes reasoned until
+      # max_tokens and returned an empty answer (smoke run, 2026-09-26); the fixed
+      # seed keeps sampling reproducible.
+      temperature: 1.0
+      seed: 1234
       reasoning_effort: medium
-      max_tokens: 4096       # reasoning tokens count toward this
+      max_tokens: 8192       # reasoning tokens count toward this
     metadata: {role: judge, family: gpt-oss, precision: mxfp4}
 
   judge-remote:
@@ -127,9 +131,10 @@ models:
     model: vllm/openai/gpt-oss-20b
     base_url: http://localhost:8001/v1
     generate_config:
-      temperature: 0.0
+      temperature: 1.0
+      seed: 1234
       reasoning_effort: medium
-      max_tokens: 4096
+      max_tokens: 8192
     metadata: {role: judge, family: gpt-oss, precision: mxfp4}
 
   # ------------------------------------------------------------ data generation

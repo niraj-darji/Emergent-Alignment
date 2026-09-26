@@ -89,8 +89,8 @@ sample completed, same seed and `--limit`).
 - The benchmark run stopped (crash, reboot, Ctrl+C): rerun the same command.
   vLLM servers started by the run shut down with it; check `nvidia-smi` for
   leftovers before restarting.
-- Restarting the judge doesn't change results: same model, version and settings,
-  temperature 0.
+- Restarting the judge doesn't change its settings (same model, version,
+  temperature 1.0 and seed).
 
 If vLLM stops with an error about not enough memory for the KV cache, check that
 nothing else is using the GPU (`nvidia-smi`). A desktop session on the same GPU

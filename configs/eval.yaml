@@ -32,7 +32,7 @@ roles:
 benchmarks:
   anima:
     headline: overall_mean
-    task: inspect_evals.anima:anima
+    task: benchmarks.anima:anima   # inspect_evals ANIMA + a fix for a crash on a missing dimension
     task_args: {languages: [English]}
     limit: null           # 115 English questions; small enough to run in full
     epochs: 1             # upstream recommends 5; raise if compute allows
