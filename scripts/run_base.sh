@@ -22,6 +22,8 @@ if ! curl -sf http://localhost:8001/v1/models > /dev/null; then
   exit 1
 fi
 
-python -m benchmarks.run --models "${MODELS[@]}" --benchmarks all --run-name "$RUN" \
+# --resume: if this run was interrupted, rerunning the same command only redoes
+# the benchmarks that didn't finish.
+python -m benchmarks.run --models "${MODELS[@]}" --benchmarks all --run-name "$RUN" --resume \
   ${LIMIT:+--limit "$LIMIT"}
 python -m benchmarks.summarize --run-name "$RUN"

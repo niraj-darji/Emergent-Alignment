@@ -67,6 +67,31 @@ rsync -a logs/base-v1/ <user>@<machine-A>:<repo>/logs/base-v1/     # run on B
 python -m benchmarks.summarize --run-name base-v1                   # run on A
 ```
 
+**One machine with two GPUs** (2x 4090 or 2x 5090): no second machine and no
+SSH tunnel. Pin the judge to one GPU and the models being tested to the other:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 bash scripts/start_judge.sh           # terminal 1: judge on GPU 1
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_base.sh base-v1      # terminal 2: models on GPU 0
+```
+
+Precision stays as decided (Gemma in 4-bit even on a 5090). The Gemma bf16
+calibration check needs a 5090; it doesn't fit a 24 GB 4090.
+
+**If something is interrupted:** run long jobs inside `tmux`, so a closed terminal
+or dropped SSH session doesn't kill them. `run_base.sh` uses `--resume`, so
+rerunning the same command redoes only the benchmarks that didn't finish (every
+sample completed, same seed and `--limit`).
+- The judge or the tunnel stopped: the judge address is `localhost`, so inspect
+  stops retrying at once and ANIMA, MANTA and sycophancy fail for the current
+  model. The other benchmarks don't need the judge. Restart `start_judge.sh`
+  (and the tunnel), then rerun `run_base.sh` with the same run name.
+- The benchmark run stopped (crash, reboot, Ctrl+C): rerun the same command.
+  vLLM servers started by the run shut down with it; check `nvidia-smi` for
+  leftovers before restarting.
+- Restarting the judge doesn't change results: same model, version and settings,
+  temperature 0.
+
 If vLLM stops with an error about not enough memory for the KV cache, check that
 nothing else is using the GPU (`nvidia-smi`). A desktop session on the same GPU
 takes 0.5–1 GB.

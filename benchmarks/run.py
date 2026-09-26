@@ -20,8 +20,10 @@ import argparse
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from inspect_ai import Task, eval, task_with
+from inspect_ai.log import list_eval_logs, read_eval_log
 from inspect_ai.model import GenerateConfig, Model
 from inspect_ai.model._model import init_model_roles
 
@@ -68,9 +70,33 @@ def build_task(bench: BenchmarkSpec, seed: int, limit_override: int | None, epoc
     )
 
 
+def finished_benchmarks(log_dir: Path, seed: int, limit: int | None) -> set[str]:
+    """Benchmarks with a successful log in log_dir where every sample completed, at this seed and --limit."""
+    done: set[str] = set()
+    if not log_dir.exists():
+        return done
+    for info in list_eval_logs(str(log_dir), recursive=True):
+        log = read_eval_log(info, header_only=True)
+        results = log.results
+        if (log.status == "success" and results is not None
+                and results.completed_samples == results.total_samples
+                and (log.eval.metadata or {}).get("seed") == seed
+                and (log.eval.metadata or {}).get("limit_override") == limit):
+            done.add(log.eval.task.split("/")[-1])
+    return done
+
+
 def run_one_model(args: argparse.Namespace, cfg: EvalConfig, registry: ModelRegistry, alias: str) -> bool:
     benches = cfg.select(args.benchmarks)
     target = registry.get(alias)
+    log_dir = cfg.log_dir / args.run_name / target.alias
+    if args.resume:
+        done = finished_benchmarks(log_dir, cfg.seed, args.limit)
+        if done & {b.name for b in benches}:
+            print(f"\n=== {target.alias}: already finished, skipping {sorted(done & {b.name for b in benches})}")
+        benches = [b for b in benches if b.name not in done]
+        if not benches:
+            return True
 
     role_names = {"grader": args.grader or cfg.roles.get("grader"),
                   "pressure": args.pressure or cfg.roles.get("pressure")}
@@ -98,7 +124,6 @@ def run_one_model(args: argparse.Namespace, cfg: EvalConfig, registry: ModelRegi
     # roles before building tasks so they bind to the configured judge.
     init_model_roles(roles)
     tasks = [build_task(b, cfg.seed, args.limit, args.epochs, roles) for b in benches]
-    log_dir = cfg.log_dir / args.run_name / target.alias
     logs = eval(
         tasks,
         model=target.build(),
@@ -113,6 +138,7 @@ def run_one_model(args: argparse.Namespace, cfg: EvalConfig, registry: ModelRegi
             **{f"model_{k}": v for k, v in target.metadata.items()},
             **{f"{role}_model": spec.model for role, spec in role_specs.items()},
             "seed": cfg.seed,
+            "limit_override": args.limit,
         },
         max_samples=args.max_samples,
         fail_on_error=args.fail_on_error,
@@ -136,6 +162,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fail-on-error", type=float, default=0.05, help="fraction of failed samples tolerated")
     p.add_argument("--display", default=None, help="inspect display: full, rich, plain, none")
     p.add_argument("--no-isolate", action="store_true", help="run all models in this process (default: one subprocess per model)")
+    p.add_argument("--resume", action="store_true",
+                   help="skip benchmarks that already finished for this model in this --run-name")
     p.add_argument("--dry-run", action="store_true", help="resolve configs and print the plan only")
     return p.parse_args(argv)
 
