@@ -698,3 +698,75 @@ benchmark.
   - the judge isn't checked against human ratings (unless §12.4's optional check was done)
   - our MANTA numbers can't be compared with the paper's (different judge and pushback writer)
   - ANIMA runs with 1 epoch instead of 5
+
+---
+
+## Appendix: Frozen settings for base-v1 (2026-09-26)
+
+**Freeze timestamp:** 2026-09-26 after smoke2 test passed all benchmarks.
+
+### Benchmark configuration
+
+| Setting | Value | Reference |
+|---------|-------|-----------|
+| Subsample seed | `1234` | `configs/eval.yaml` |
+| Models | Qwen3-8B, Llama-3.1-8B (bf16); Gemma-3-12B-it (bnb-nf4) | `configs/models.yaml` |
+| max_model_len (targets) | 16384 | Covers MANTA at 5 turns (~12k) + safety margin |
+
+### Per-benchmark limits and epochs
+
+| Benchmark | Limit | Epochs | Notes |
+|-----------|-------|--------|-------|
+| ANIMA | null (115 full) | 1 | All English questions |
+| MANTA | 150 | 1 | Of 1090 species scenarios |
+| BBQ | 1000 | 1 | Of ~58.5k; half ambiguous |
+| HHH | null (221 full) | 1 | All items |
+| Sycophancy | 500 | 1 | |
+| MMLU | 1000 | 1 | Subset of full test |
+| HellaSwag | 500 | 1 | |
+
+### Judge (grading and MANTA pressure)
+
+| Setting | Value | Reference |
+|---------|-------|-----------|
+| Model | `openai/gpt-oss-20b` | Not from target families (Qwen, Llama, Gemma) |
+| Revision | `6cee5e81ee83917806bbde320786a8fb61efebee` | Pinned in `configs/models.yaml` |
+| max_model_len (judge) | 32768 | MANTA conversation + rubric + reasoning |
+| max_tokens (judge) | 8192 | Reasoning tokens count toward this (extended from 4096 after smoke1 empty-reply failures) |
+| temperature | 1.0 | gpt-oss recommended (changed from 0.0 to avoid long thinking → empty replies) |
+| seed | 1234 | Fixed for reproducibility |
+| reasoning_effort | medium | |
+
+### MANTA pressure writer
+
+Same as judge (gpt-oss-20b), with retry logic for empty turns (up to 3 attempts with seed variants).
+
+### Data generator (for future fine-tuning)
+
+| Setting | Value |
+|---------|-------|
+| Model | `Intel/Mistral-Small-3.2-24B-Instruct-2506-int4-AutoRound` |
+| temperature | 0.8 |
+| max_tokens | 2048 |
+
+### Software versions
+
+**On both machines (locked in `requirements.txt`):**
+- Python: 3.11
+- `inspect-ai`: 0.3.268
+- `inspect_evals[anima]`: 0.21.0
+- `vllm`: 0.22.1
+- `bitsandbytes`: ≥ 0.46
+- `torch`: (from vllm requirements)
+
+**NVIDIA (checked with `nvidia-smi`):**
+- Driver: 570+ (machine B has 580.178.04)
+- CUDA: 12.8+ (machine B has 13.0)
+
+### Why these values
+
+- **max_tokens 8192 on judge:** smoke1 test at 4096 resulted in 1 ANIMA and 1 MANTA empty reply (gpt-oss spent all tokens reasoning). Doubled to 8192; smoke2 passed all 21 benchmarks with no empty replies.
+- **temperature 1.0 on judge:** gpt-oss's documented recommendation for stable sampling. At 0.0, it enters long reasoning loops at temperature 0 (smoke1 evidence).
+- **Limits per benchmark:** balanced between compute budget and statistical power. ANIMA, HHH run in full; others subsampled at ~500–1000 or proportional to dataset size.
+
+Any change to these settings after base-v1 starts requires a new freeze tag and must be documented in reports.
