@@ -2,7 +2,8 @@
 # with the same inspect-ai / inspect_evals versions.
 inspect-ai==0.3.268
 inspect_evals[anima]==0.21.0
-vllm
+vllm==0.22.1                  # the version all configs were tested with; numerics can shift between versions
+bitsandbytes>=0.46            # 4-bit NF4 for Gemma-3-12B (vLLM `quantization: bitsandbytes`, later QLoRA)
 huggingface_hub
 pyyaml
 python-dotenv

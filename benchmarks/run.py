@@ -22,19 +22,39 @@ import sys
 from datetime import datetime
 
 from inspect_ai import Task, eval, task_with
-from inspect_ai.model import GenerateConfig
+from inspect_ai.model import GenerateConfig, Model
 from inspect_ai.model._model import init_model_roles
 
 from benchmarks.config import REPO_ROOT, BenchmarkSpec, EvalConfig, ModelRegistry, load_env
 
 
-def build_task(bench: BenchmarkSpec, seed: int, limit_override: int | None, epochs_override: int | None) -> Task:
-    task = bench.task_fn()(**bench.task_args)
+ROLE_PREFIX = "role:"
+
+
+def resolve_task_args(bench: BenchmarkSpec, roles: dict[str, Model]) -> dict:
+    """Replace "role:<name>" task_args with that role's model (e.g. a scorer_model argument)."""
+    args = {}
+    for key, value in bench.task_args.items():
+        if isinstance(value, str) and value.startswith(ROLE_PREFIX):
+            role = value[len(ROLE_PREFIX):]
+            if role not in roles:
+                raise SystemExit(f"Benchmark '{bench.name}': task_args.{key} needs role '{role}'; "
+                                 f"add it to the benchmark's roles in configs/eval.yaml")
+            value = roles[role]
+        args[key] = value
+    return args
+
+
+def build_task(bench: BenchmarkSpec, seed: int, limit_override: int | None, epochs_override: int | None,
+               roles: dict[str, Model] | None = None) -> Task:
+    task = bench.task_fn()(**resolve_task_args(bench, roles or {}))
     dataset = task.dataset
     dataset.shuffle(seed=seed)
     limit = limit_override if limit_override is not None else bench.limit
     if limit is not None:
         dataset = dataset[: min(limit, len(dataset))]
+    if bench.shuffle_choices:
+        dataset.shuffle_choices(seed=seed)
     config = task.config.merge(GenerateConfig(**bench.generate_config)) if bench.generate_config else task.config
     epochs = epochs_override if epochs_override is not None else bench.epochs
     return task_with(
@@ -77,7 +97,7 @@ def run_one_model(args: argparse.Namespace, cfg: EvalConfig, registry: ModelRegi
     # silently fall back to the *target* model if no role is active. Activate the
     # roles before building tasks so they bind to the configured judge.
     init_model_roles(roles)
-    tasks = [build_task(b, cfg.seed, args.limit, args.epochs) for b in benches]
+    tasks = [build_task(b, cfg.seed, args.limit, args.epochs, roles) for b in benches]
     log_dir = cfg.log_dir / args.run_name / target.alias
     logs = eval(
         tasks,

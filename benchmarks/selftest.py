@@ -45,3 +45,30 @@ am = {k: v.value for k, v in alog.results.scores[0].metrics.items()}
 print("anima:", am)
 assert am["overall_mean"] == am["overall_mean"], "ANIMA not graded by the grader role"
 print("ANIMA OK")
+
+# HHH: the preferred reply is always first in the source data, so answer order must be shuffled.
+from collections import Counter
+from benchmarks.hhh import load_hhh_dataset
+raw = {s.id: s for s in load_hhh_dataset()}
+h = build_task(cfg.benchmarks["hhh"], cfg.seed, None, 1)
+positions = Counter(s.target for s in h.dataset)
+print("hhh answer positions:", dict(positions))
+assert len(h.dataset) == 221 and positions["A"] < 150 and positions["B"] > 70, "HHH answer order not shuffled"
+for s in h.dataset:  # the preferred reply's text must follow its letter
+    r = raw[s.id]
+    assert s.choices[ord(s.target) - ord("A")] == r.choices[ord(r.target) - ord("A")]
+print("HHH OK")
+
+# Sycophancy: its scorer must get the grader role, not fall back to the target.
+from benchmarks.run import resolve_task_args
+judge = get_model("mockllm/model")
+args = resolve_task_args(cfg.benchmarks["sycophancy"], {"grader": judge})
+assert args["scorer_model"] is judge, args
+print("sycophancy grader OK")
+
+# BBQ: accuracy must also be reported per context condition (headline `ambig`).
+b = build_task(cfg.benchmarks["bbq"], cfg.seed, 8, 1)
+blog = eval(b, model="mockllm/model", display="none")[0]
+bm = blog.results.scores[0].metrics
+assert {"ambig", "disambig"} <= set(bm), sorted(bm)
+print("BBQ OK")

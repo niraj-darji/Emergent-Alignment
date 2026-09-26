@@ -70,14 +70,16 @@ All benchmarks are subsampled to fit the compute budget. Use **fixed subsample s
 | Axis | Benchmarks | Notes | Lead |
 |------|-----------|-------|------|
 | Animal welfare | ANIMA (Brazilek & Tidmarsh 2026; formerly "AHB"), MANTA (Luong et al. 2026, 5-turn adversarial) | LLM-as-judge with a **local** judge model; small MANTA subset | Jevin |
-| Human safety / bias | BBQ, Anthropic model-written evals (sycophancy, power-seeking…), HHH (Askell et al. 2021), ToxiGen | ToxiGen scored with a **local toxicity classifier**, no external API | Jevin |
-| Capability | MMLU, HellaSwag, GSM8K | Checks that capability did not drop | Niraj |
+| Human safety / bias | BBQ (Parrish et al. 2022), HHH (Askell et al. 2021), Sycophancy "are you sure?" (Sharma et al. 2023) | BBQ headline = accuracy on ambiguous contexts; HHH answer order shuffled; sycophancy graded by the judge | Jevin |
+| Capability | MMLU, HellaSwag | Checks that capability did not drop | Niraj |
+
+**Benchmark set decided 2026-09-25:** ANIMA, MANTA, BBQ, HHH, Sycophancy, MMLU, HellaSwag. Dropped from the proposal: **GSM8K** and **ToxiGen** (ToxiGen would need a port, and modern instruct models sit near 0% toxicity, so it can't show change). State this in the mid-term report.
 
 **ANIMA is not AnimalHarmBench.** The proposal names AnimalHarmBench (Kanepajs et al. 2025). We use ANIMA instead, the benchmark from the paper we extend, which makes our results directly comparable to it. Say so in the mid-term report and fix the citation.
 
 **Pipeline (implemented):** `benchmarks/` + `configs/`. See `benchmarks/README.md`.
 - Models are pluggable: any inspect model string or an alias in `configs/models.yaml` (vLLM, LoRA adapters via `vllm/<base>:<adapter>`, quantized checkpoints, remote servers). Don't hard-code model IDs in code.
-- Benchmarks, seed, subsample sizes and the judge (`grader`) / MANTA pressure (`pressure`) roles live in `configs/eval.yaml`. New benchmarks (BBQ, ToxiGen, …) are added there.
+- Benchmarks, seed, subsample sizes and the judge (`grader`) / MANTA pressure (`pressure`) roles live in `configs/eval.yaml`. Suites: `animal_welfare`, `human_safety`, `capability`, `all`. HHH (`benchmarks/hhh.py`) and the BBQ wrapper (`benchmarks/bbq.py`) are ours; task_args `role:grader` routes a task's own scorer to the judge (used by sycophancy).
 - Run: `python -m benchmarks.run --models <aliases> --run-name <name>`, then `python -m benchmarks.summarize --run-name <name>`. Smoke test without a GPU: `--models mock --grader mock --pressure mock --limit 3`.
 - MANTA is our port (not in inspect_evals). Prompts are fetched from the upstream repo at a pinned commit because it has no license. Our MANTA numbers compare only within this study (different judge and pressure models than the paper).
 - Local GPU is a 6 GB GTX 1660 Ti: too small for 8–12B models. Real runs need a bigger GPU or cluster.

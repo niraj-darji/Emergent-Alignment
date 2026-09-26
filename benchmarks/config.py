@@ -108,6 +108,7 @@ class BenchmarkSpec:
     generate_config: dict[str, Any] = field(default_factory=dict)
     group: str = ""
     headline: str = "accuracy"
+    shuffle_choices: bool = False
 
     def task_fn(self):
         module_name, _, fn_name = self.task.partition(":")

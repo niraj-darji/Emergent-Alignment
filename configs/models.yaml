@@ -27,7 +27,9 @@
 # other providers.
 vllm_defaults:
   model_args:
-    gpu_memory_utilization: 0.85
+    # 0.90 on a headless GPU. At 0.85 an 8B bf16 model on the 24 GB 4090 may not
+    # have room for one 16k-token conversation, and vLLM refuses to start.
+    gpu_memory_utilization: 0.90
     # Prompt + response tokens per request, not response length (that is max_tokens).
     # 16384 covers MANTA's worst case (5 replies x 2048 + user turns ~ 11.7k).
     # Keep it identical for every target and condition. See
@@ -38,12 +40,11 @@ vllm_defaults:
 
 models:
   # ---------------------------------------------------------------- base models
-  gemma3-12b:
-    model: vllm/google/gemma-3-12b-it
-    metadata: {family: gemma3, size: 12b, condition: base, precision: bf16}
-
+  # Revisions are pinned to the downloaded snapshots, so a new upstream release can't
+  # change a model mid-study, and cached models load without looking up "main".
   qwen3-8b:
     model: vllm/Qwen/Qwen3-8B
+    model_args: {revision: b968826d9c46dd6066d109eabc6255188de91218}
     generate_config:
       # Thinking mode is fixed OFF for data generation, training and eval (see CLAUDE.md).
       extra_body: {chat_template_kwargs: {enable_thinking: false}}
@@ -51,7 +52,28 @@ models:
 
   llama3.1-8b:
     model: vllm/meta-llama/Llama-3.1-8B-Instruct
+    model_args: {revision: 0e9e39f249a16976918f6564b8830bc894c89659}
     metadata: {family: llama3, size: 8b, condition: base, precision: bf16}
+
+  # Gemma-3-12B in bf16 (~24.4 GB) does not fit the 4090, and bf16 LoRA fits neither
+  # GPU, so every Gemma condition uses 4-bit NF4 (material/quantization-strategy.md §1).
+  # `gemma3-12b` is only the shared parent of the two entries below.
+  gemma3-12b:
+    model: vllm/google/gemma-3-12b-it
+    model_args:
+      revision: 96b6f1eccf38110c56df3a15bffe176da04bfd80
+      language_model_only: true   # text-only study: no image inputs, no memory reserved for them
+    metadata: {family: gemma3, size: 12b, condition: base, precision: bf16}
+
+  gemma3-12b-nf4:                 # the Gemma model of the study
+    extends: gemma3-12b
+    model_args: {quantization: bitsandbytes}
+    metadata: {precision: bnb-nf4}
+
+  gemma3-12b-bf16-calib:          # one-off check of the 4-bit effect: capability suite on the 5090 only
+    extends: gemma3-12b
+    model_args: {gpu_memory_utilization: 0.92, max_model_len: 4096}
+    metadata: {condition: base-calib}
 
   # ------------------------------------------------ quantized variants (examples)
   # A quantized base control must be compared against fine-tuned models at the
@@ -60,11 +82,6 @@ models:
   #   extends: qwen3-8b
   #   model: vllm/Qwen/Qwen3-8B-AWQ
   #   metadata: {precision: awq-4bit}
-  #
-  # gemma3-12b-bnb4:
-  #   extends: gemma3-12b
-  #   model_args: {quantization: bitsandbytes}
-  #   metadata: {precision: bnb-4bit}
 
   # ------------------------------------------------ fine-tuned variants (examples)
   # LoRA adapters are loaded on top of the base model by vLLM:

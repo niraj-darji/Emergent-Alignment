@@ -135,7 +135,7 @@ fit together on B (§2). The 8B bf16 targets don't. Running them next to the
 judge would mean switching them to nf4, which changes their precision, so treat
 that as a last resort and log it as a deviation.
 
-### During capability runs (MMLU / GSM8K / HellaSwag; no judge)
+### During capability runs (MMLU / HellaSwag; no judge)
 
 These don't need the judge, so both GPUs can run targets in parallel. Stop the
 judge server on B first.
@@ -270,7 +270,7 @@ evals.
 - **Identical packages.** Pin `vllm` in `requirements.txt` (currently unpinned; the laptop has `0.22.1`), and add `bitsandbytes`. vLLM or bitsandbytes updates can shift scores, so both machines must run the same versions for the whole study.
 - **5090 (Blackwell) needs recent software:** an NVIDIA driver 570+ and CUDA 12.8+ builds of PyTorch, vLLM and bitsandbytes. Before real runs, do one short smoke test of each precision on B (bf16, NF4, AWQ, NF4 + LoRA):
   ```bash
-  python -m benchmarks.run --models gemma3-12b-nf4 --benchmarks gsm8k --limit 5 --run-name smoke-b
+  python -m benchmarks.run --models gemma3-12b-nf4 --benchmarks mmlu --limit 5 --run-name smoke-b
   ```
 - **Shared HF cache per machine** with ~100 GB free: `export HF_HOME=/path/with/space/hf`.
 - **Gated models:** accept the Gemma and Llama licenses, and run `hf auth login` on both machines.
@@ -354,7 +354,8 @@ Worst case per benchmark, with `max_tokens` = 2048:
 | Benchmark | Prompt | Response | Worst case |
 |-----------|--------|----------|-----------|
 | MMLU / HellaSwag | < 1k | ≤ 2048 | ~3k |
-| GSM8K (5-shot) | ~1–1.5k | ≤ 2048 | ~3.5k |
+| BBQ / HHH | < 1k | ≤ 2048 | ~3k |
+| Sycophancy (2 turns) | < 1k + first reply | ≤ 2048 | ~5k |
 | ANIMA | < 0.5k | ≤ 2048 | ~2.5k |
 | **MANTA** | 5 user turns (~100–300 tokens each) + 4 earlier replies | 5th reply ≤ 2048 | **5 × 2048 + ~1.5k ≈ 11.7k** |
 
@@ -568,14 +569,14 @@ safety), **N** = Niraj (capability). *Both* = do it together.
 
 ### Phase 0: configs and code (laptop, no GPU)
 
-- [ ] **(Both) Decide on the human-safety benchmarks now.** The base run must include every benchmark used later, or it has to be repeated. `inspect_evals` has `bbq` and `sycophancy`. ToxiGen (with a local classifier) and HHH aren't in it and would need a port like MANTA's. Either add them now, or agree they'll be a separate `base-v1-safety` run later, with the same seed and models.
-- [ ] (J) Add the chosen human-safety benchmarks to `configs/eval.yaml` (`group: human_safety`, a seeded `limit`, a `headline` metric) and add a `human_safety` suite.
-- [ ] (N) Add to `configs/models.yaml` (§4):
+- [x] **(Both) Decide on the human-safety benchmarks.** Decided 2026-09-25: BBQ, HHH, Sycophancy. GSM8K and ToxiGen are dropped.
+- [x] Add them to `configs/eval.yaml` (`human_safety` suite). HHH is ours (`benchmarks/hhh.py`), BBQ has a wrapper (`benchmarks/bbq.py`), and sycophancy is graded by the judge. `python -m benchmarks.selftest` checks all three.
+- [x] (N) Add to `configs/models.yaml` (§4):
   - `gemma3-12b-nf4` (`quantization: bitsandbytes`, `language_model_only: true`, `precision: bnb-nf4`)
   - `gemma3-12b-bf16-calib` (`max_model_len: 4096`, `gpu_memory_utilization: 0.92`, `condition: base-calib`)
   - optionally `qwen3-8b-nf4-calib`
-- [ ] (N) Pin `vllm` in `requirements.txt` to the version installed on the GPU machines, and add `bitsandbytes` and `transformers`.
-- [ ] (N) Decide `gpu_memory_utilization` for the 4090: 0.90 if headless, 0.85 if a monitor uses it (§4). Put it in `vllm_defaults`.
+- [x] (N) Pin `vllm` in `requirements.txt` (0.22.1) and add `bitsandbytes`. The three models being tested are also pinned to their downloaded revisions in `models.yaml`.
+- [x] (N) `gpu_memory_utilization: 0.90` in `vllm_defaults` (§4). At 0.85, an 8B bf16 model on the 4090 may not fit a 16k-token conversation.
 - [ ] (Both) Check the plan without loading anything:
   ```bash
   python -m benchmarks.run --models qwen3-8b llama3.1-8b gemma3-12b-nf4 --dry-run
@@ -616,7 +617,10 @@ safety), **N** = Niraj (capability). *Both* = do it together.
   - [ ] `judge_parse_failures` is 0 or close to it.
   - [ ] MANTA turns 3–5 actually push back (§12.3). If not, apply the pressure-role fallback.
   - [ ] Read 10 judge scores and their explanations. Do they roughly make sense (§12.4)?
-- [ ] If human-safety benchmarks were added: run the same 5-sample smoke test for them.
+- [ ] (J) Human-safety smoke test, then read a few sycophancy judge decisions ("did it back down?") in `inspect view`:
+  ```bash
+  python -m benchmarks.run --models qwen3-8b --benchmarks human_safety --limit 5 --run-name smoke-safety
+  ```
 
 ### Phase 3: length pilot (§11.3)
 
@@ -642,6 +646,8 @@ Nothing below may change after `base-v1` starts. The fine-tuned runs must use th
 
 ### Phase 5: the base run
 
+Shortcut: `bash scripts/run_base.sh base-v1` on A runs every benchmark for the three models (the judge from `scripts/start_judge.sh` must be reachable). See `benchmarks/README.md`.
+
 **Animal welfare (needs the judge; A runs the targets, B serves the judge):**
 - [ ] (J)
   ```bash
@@ -649,8 +655,8 @@ Nothing below may change after `base-v1` starts. The fine-tuned runs must use th
     --benchmarks animal_welfare --run-name base-v1
   ```
 
-**Human safety** (if added; needs the judge only if a benchmark uses one):
-- [ ] (J) Same command with `--benchmarks human_safety`.
+**Human safety (BBQ, HHH, Sycophancy; the judge must be running for Sycophancy):**
+- [ ] (J) Same command with `--benchmarks human_safety`. Sycophancy needs the judge; BBQ and HHH don't.
 
 **Capability (no judge; stop the judge server on B first):**
 - [ ] (N) On A:
@@ -673,7 +679,7 @@ benchmark.
 - [ ] Copy `logs/base-v1/` from B to A, so all logs are in one place.
 - [ ] `python -m benchmarks.summarize --run-name base-v1` should produce `results/base-v1/summary.csv` and `scores_long.csv`.
 - [ ] Sanity-check the numbers:
-  - MMLU and GSM8K roughly match each model's published scores (within a few points, since we use subsamples and our own prompts).
+  - MMLU and HellaSwag roughly match each model's published scores (within a few points, since we use subsamples and our own prompts).
   - No benchmark has many errored samples (`inspect view`).
   - `judge_parse_failures` ≈ 0 for ANIMA and MANTA.
 - [ ] Record the Gemma bf16 vs nf4 gap per capability benchmark (§5).
@@ -685,6 +691,7 @@ benchmark.
 - [ ] State the model changes from the proposal:
   - Gemma 2 → Gemma 3, Qwen 2.5 → Qwen3, and the new Llama family
   - ANIMA instead of AnimalHarmBench
+  - GSM8K and ToxiGen dropped; HHH is asked as a multiple-choice question with shuffled order, not scored by log-likelihood
   - the gpt-oss judge and Mistral generator
   - Gemma evaluated at 4-bit, with the calibration gap
 - [ ] State the limitations:
