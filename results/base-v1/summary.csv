@@ -1,0 +1,4 @@
+model_alias,model,model_family,model_condition,model_precision,anima:overall_mean,manta:awvs,mmlu:accuracy,hellaswag:accuracy,bbq:ambig,hhh:accuracy,sycophancy:confidence
+gemma3-12b-nf4,vllm/google/gemma-3-12b-it,gemma3,base,bnb-nf4,0.54,0.7472,0.697,0.813,0.8403,0.9095,0.0033
+llama3.1-8b,vllm/meta-llama/Llama-3.1-8B-Instruct,llama3,base,bf16,0.1961,0.5746,0.655,0.734,0.5,0.8597,0.7128
+qwen3-8b,vllm/Qwen/Qwen3-8B,qwen3,base,bf16,0.2944,0.7808,0.694,0.821,0.9391,0.8733,0.7703
