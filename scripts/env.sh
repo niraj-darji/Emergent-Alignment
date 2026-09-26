@@ -9,6 +9,25 @@ CUDA_PIP="$(python -c 'import nvidia, os; print(os.path.join(list(nvidia.__path_
 if [ -n "$CUDA_PIP" ] && [ -x "$CUDA_PIP/bin/nvcc" ]; then
   export CUDA_HOME="$CUDA_PIP"
   export PATH="$CUDA_HOME/bin:$PATH"
+  export FLASHINFER_NVCC="nvcc -DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK"
+  if [ ! -d "$CUDA_HOME/lib64" ]; then
+    ln -sf lib "$CUDA_HOME/lib64"
+  fi
+  if [ ! -e "$CUDA_HOME/lib/libcudart.so" ] && [ -e "$CUDA_HOME/lib/libcudart.so.13" ]; then
+    ln -sf libcudart.so.13 "$CUDA_HOME/lib/libcudart.so"
+  fi
 else
   echo "Warning: no nvcc in the venv's CUDA toolkit; using CUDA_HOME=${CUDA_HOME:-<unset>}" >&2
+fi
+
+# Automatically load .env if it exists
+if [ -f "$(dirname "${BASH_SOURCE[0]}")/../.env" ]; then
+  set -a
+  source "$(dirname "${BASH_SOURCE[0]}")/../.env"
+  set +a
+fi
+
+# The project uses HF_TOKEN_VALUE, map it to HF_TOKEN for standard HF tools
+if [ -z "${HF_TOKEN:-}" ] && [ -n "${HF_TOKEN_VALUE:-}" ]; then
+  export HF_TOKEN="$HF_TOKEN_VALUE"
 fi

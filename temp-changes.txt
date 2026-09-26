@@ -1,0 +1,7 @@
+###########################################################3
+change 1
+###########################################################3
+I modified `scripts/env.sh` to include the following fixes for the FlashInfer compilation issue:
+1. Exported `FLASHINFER_NVCC="nvcc -DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK"` to bypass the CUDA compiler and toolkit header compatibility check mismatch (where pip-installed `nvcc` is `13.4` and `cuda_runtime_api.h` is `13.0`).
+2. Added code to dynamically create a `lib64` symlink pointing to `lib` within the pip-installed CUDA directory because FlashInfer explicitly passes `-L$cuda_home/lib64` to the linker, while pip installs it to `lib`.
+3. Added code to dynamically create a `libcudart.so` symlink pointing to `libcudart.so.13` in the pip CUDA `lib` directory so that `-lcudart` correctly resolves during the linking phase.
