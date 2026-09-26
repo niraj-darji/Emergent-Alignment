@@ -6,6 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source .venv/bin/activate
+source scripts/env.sh
 
 exec vllm serve openai/gpt-oss-20b \
   --revision 6cee5e81ee83917806bbde320786a8fb61efebee \
