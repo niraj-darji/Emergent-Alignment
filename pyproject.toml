@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "awmsm"
+version = "0.1.0"
+description = "Animal-welfare Model Spec Midtraining (AW-MSM): data generation, training and evaluation pipeline"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  # Phase 0 (generation client) only. Training/eval deps are added in later phases,
+  # in their own environments, so the client never pulls in torch/vLLM.
+  "openai>=1.60",
+  "httpx>=0.27",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,39 @@
+# Global defaults (§13.3). Paths are relative to the repo root unless absolute.
+project: awmsm
+
+paths:
+  data: data
+  runs: runs
+  results: results
+  cache: .cache            # LLM disk cache + request log (SQLite); keep on the big disk
+  logs: logs
+
+identity:
+  assistant_name: "Aster"          # invented; MUST NOT be a real product (§6.6)
+  developer_name: "Your Lab"       # TODO: choose before corpus generation
+
+base_models:
+  primary: meta-llama/Llama-3.1-8B
+  replication: Qwen/Qwen3-8B-Base
+
+# Roles -> server + model profile (profiles live in gen.yaml `models:`).
+# Servers are bound to 127.0.0.1 on wtc11 (see claude/phase0_setup_log.md);
+# the pipeline runs on wtc11 itself. Only one model fits on wtc11 at a time.
+servers:
+  generator:    {base_url: "http://127.0.0.1:8000/v1", model: qwen3.8-27b-fp8}
+  filter_judge: {base_url: "http://127.0.0.1:8000/v1", model: qwen3.8-27b-fp8}   # same as generator (§6.1)
+  eval_judge:   {base_url: "http://127.0.0.1:8002/v1", model: gemma-4-31b-it}    # evaluation phase only
+  # drafter (optional, §6.1): not configured in Phase 0
+
+# D13: the evaluation judge MUST come from a different family than generator AND filter judge.
+# Checked at config load from the `family` field of each model profile.
+
+seeds:
+  midtrain: [1, 2]
+  aft: [1, 2]
+  generation: 0        # base seed; per-request seeds are derived from it (llm.py)
+
+token_budget:
+  midtrain_tokens: 5_000_000
+  midtrain_tolerance: 0.02
+  aw_demo_assistant_tokens: 1_500_000
