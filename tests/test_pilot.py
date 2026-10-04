@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import random
@@ -8,7 +9,7 @@ import pytest
 
 from awmsm import prompts
 from awmsm.config import Config
-from awmsm.gen.dedup import greedy_dedup, ngram_covered_share, ngrams, tokens
+from awmsm.gen.dedup import greedy_dedup, ngram_seen_share, ngrams, seeded_order, tokens
 from awmsm.gen.midtrain_pipeline import DocChecks, extract_content
 from awmsm.gen.quotas import allocate, check_quotas, plan_calls
 from awmsm.io import read_jsonl
@@ -81,7 +82,12 @@ def test_ngram_dedup_and_cosine():
     texts = [base, base + " extra tail words", " ".join(f"z{i}" for i in range(200))]
     r = greedy_dedup(texts)
     assert r.kept == [0, 2] and r.removed[0]["reason"] == "ngram13"
-    assert ngram_covered_share(tokens(texts[2]), ngrams(tokens(base))) == 0.0
+    assert ngram_seen_share(tokens(texts[2]), ngrams(tokens(base))) == 0.0
+    # share counts n-grams: doc = base + 13 new words -> 188 of 201 13-grams seen
+    t2 = tokens(base + " " + " ".join(f"n{i}" for i in range(13)))
+    assert abs(ngram_seen_share(t2, ngrams(tokens(base))) - 188 / 201) < 1e-9
+    assert seeded_order(["b", "a", "c"], 1) == seeded_order(["b", "a", "c"], 1)
+    assert sorted(seeded_order(["b", "a", "c"], 1)) == [0, 1, 2]
     np = pytest.importorskip("numpy")
     emb = np.array([[1, 0], [0.999, 0.0447], [0, 1]], dtype=float)
     emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
@@ -90,17 +96,47 @@ def test_ngram_dedup_and_cosine():
 
 
 # ------------------------------------------------------------------------- stats
-def test_wilson_and_kappa_and_decision():
+RULE = {"primary": "mean_quality", "tie_margin": 0.25, "tie_breaker": "mean_s8_pass_rate_across_judges",
+        "veto": {"min_extra_failing_docs": 3, "nominal_pp": 0.12},
+        "candidate_c_trigger": {"human_fail_rate_above": 0.15}, "throughput": "feasibility_check_only"}
+
+
+def _audit(qa, qb, fa, fb):
+    ids = [f"i{k:02d}" for k in range(25)]
+    mk = lambda q, f: {"quality_by_idea": dict(zip(ids, q)), "fail_by_idea": dict(zip(ids, f)),  # noqa: E731
+                       "human_fail_rate": sum(f) / 25, "mean_quality": sum(q) / 25}
+    return {"by_candidate": {"A": mk(qa, fa), "B": mk(qb, fb)}}
+
+
+M = {"candidates": {"A": {"mean_pass_rate_across_judges": 0.60}, "B": {"mean_pass_rate_across_judges": 0.70}}}
+
+
+def test_wilson_and_kappa():
     lo, hi = wilson(150, 200)
     assert 0.68 < lo < 0.75 < hi < 0.81
     assert cohen_kappa([(True, True), (False, False), (True, False), (False, True)]) == 0.0
-    audit = {"by_candidate": {"A": {"mean_quality": 3.9, "human_fail_rate": 0.2},
-                              "B": {"mean_quality": 3.8, "human_fail_rate": 0.1}}}
-    m = {"candidates": {"A": {"mean_pass_rate_across_judges": 0.6}, "B": {"mean_pass_rate_across_judges": 0.7}}}
-    assert decide(None, audit, m)["winner"] is None
-    assert decide({"primary": "mean_quality", "tie_margin": 0.05}, audit, m)["winner"] == "A"
-    assert decide({"primary": "mean_quality", "tie_margin": 0.25}, audit, m)["winner"] == "B"  # tie -> pass rate
-    assert decide({"primary": "human_fail_rate", "tie_margin": 0.05}, audit, m)["winner"] == "B"
+
+
+def test_decision_rule_v17():
+    f0 = [False] * 25
+    assert decide(None, _audit([4] * 25, [3] * 25, f0, f0), M)["winner"] is None
+    # primary: paired mean quality A-B = +0.4 >= 0.25 -> A
+    d = decide(RULE, _audit([4] * 10 + [3] * 15, [3] * 25, f0, f0), M)
+    assert d["winner"] == "A" and not d["veto_applied"] and abs(d["paired_mean_diff"]["A-B"] - 0.4) < 1e-9
+    # tie (+0.2) -> higher mean S8 pass rate across judges -> B
+    d = decide(RULE, _audit([4] * 5 + [3] * 20, [3] * 25, f0, f0), M)
+    assert d["winner"] == "B" and "tie" in d["reason"]
+    # veto: A better quality but 3 more failing docs -> B wins, flagged
+    fa = [True] * 3 + [False] * 22
+    d = decide(RULE, _audit([5] * 25, [3] * 25, fa, f0), M)
+    assert d["winner"] == "B" and d["veto_applied"]
+    # 2 extra failing docs: no veto, quality decides
+    fa2 = [True] * 2 + [False] * 23
+    assert decide(RULE, _audit([5] * 25, [3] * 25, fa2, f0), M)["winner"] == "A"
+    # both above 15% -> candidate C, no winner
+    many = [True] * 4 + [False] * 21     # 16%
+    d = decide(RULE, _audit([4] * 25, [3] * 25, many, many), M)
+    assert d["winner"] is None and d["run_candidate_c"]
 
 
 # ------------------------------------------------------------------- pilot end-to-end
@@ -153,11 +189,19 @@ async def test_pilot_end_to_end(pilot_cfg):
     assert set(m["pass_rates"]) == {"A_by_A", "A_by_B", "B_by_A", "B_by_B"}
     assert all(v["judged"] == 20 for v in m["pass_rates"].values())
 
+    with pytest.raises(PilotError, match="Register the decision rule"):
+        pilot.phase_audit_export()
+    pilot.p["decision_rule"] = copy.deepcopy(RULE)
+    reg = pilot.phase_register_rule()
+    assert reg["registered_at"] and reg["sha256"]
     r = pilot.phase_audit_export()
     assert r["items"] == 10
     key = json.loads((root / "audit/.private/audit_key.json").read_text())["items"]
     packet = (root / "audit/audit_packet.md").read_text()
     assert "Qwen" not in packet and "gemma" not in packet.lower()   # writer hidden
+    judged = [json.loads(line) for line in (root / "judged/A_by_A.jsonl").open()]
+    assert "INCLUDE" not in packet and "EXCLUDE" not in packet          # S8 verdicts hidden
+    assert not any(r["rationale"]["faithful"] in packet for r in judged)
     # label: candidate B slightly better
     lab = root / "audit/audit_labels.csv"
     rows = list(csv.DictReader(lab.open()))
@@ -173,9 +217,11 @@ async def test_pilot_end_to_end(pilot_cfg):
     with pytest.raises(PilotError, match="refusing to overwrite"):
         pilot.phase_audit_export()
 
-    out = pilot.phase_report()
-    text = out.read_text()
-    assert "NOT SET" in text and "none yet" in text      # no winner without a pre-registered rule
-    pilot.p["decision_rule"] = {"primary": "mean_quality", "tie_margin": 0.25}
     text = pilot.phase_report().read_text()
-    assert "**Winner: B**" in text and "2 × 2" in text
+    assert "**Winner: B**" in text and "2 × 2" in text and "registered" in text
+    # the registered rule cannot be changed afterwards
+    pilot.p["decision_rule"]["tie_margin"] = 0.5
+    with pytest.raises(PilotError, match="differs from the registered rule"):
+        pilot.phase_report()
+    with pytest.raises(PilotError, match="different rule was already registered"):
+        pilot.phase_register_rule()

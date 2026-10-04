@@ -2,9 +2,9 @@
 
 * Embeddings: ``sentence-transformers/all-mpnet-base-v2`` [default]. A document is removed if its
   cosine similarity to any already-kept document exceeds 0.92 [default] (greedy, input order).
-* 13-gram overlap: a document is removed if more than 30% [default] of its tokens are covered by
-  13-grams that also occur in already-kept documents. ASSUMPTION: overlap is measured against the
-  union of kept documents (the doc does not say pairwise vs union; union is the stricter reading).
+* 13-gram overlap: a document is removed if more than 30% [default] of its 13-grams already appear
+  in the documents kept so far (checked against the union of all kept documents, not pair by pair).
+* Documents are processed in a seeded, fixed order (``seeded_order``) so the result is reproducible.
 
 Embedding needs the optional extra: ``uv pip install -e ".[embed]" --torch-backend=cpu``. On wtc11
 run it on CPU (``CUDA_VISIBLE_DEVICES=""``) so it never competes with the vLLM server for the GPU.
@@ -22,16 +22,19 @@ def tokens(text: str) -> list[str]:
     return _TOK.findall(text.lower())
 
 
-def ngram_covered_share(toks: list[str], seen: set[tuple[str, ...]], n: int = 13) -> float:
-    """Share of ``toks`` positions covered by an n-gram that is in ``seen``."""
-    if len(toks) < n:
-        return 0.0
-    covered = [False] * len(toks)
-    for i in range(len(toks) - n + 1):
-        if tuple(toks[i:i + n]) in seen:
-            for j in range(i, i + n):
-                covered[j] = True
-    return sum(covered) / len(toks)
+def ngram_seen_share(toks: list[str], seen: set[tuple[str, ...]], n: int = 13) -> float:
+    """Share of the document's n-grams (one per position) that already appear in ``seen`` (§6.3 S9)."""
+    grams = [tuple(toks[i:i + n]) for i in range(len(toks) - n + 1)]
+    return sum(g in seen for g in grams) / len(grams) if grams else 0.0
+
+
+def seeded_order(ids: Sequence[str], seed: int) -> list[int]:
+    """Indices of ``ids`` in a seeded, fixed order: sort by id first (independent of file order),
+    then shuffle with ``seed``."""
+    import random
+    idx = sorted(range(len(ids)), key=lambda i: ids[i])
+    random.Random(seed).shuffle(idx)
+    return idx
 
 
 def ngrams(toks: list[str], n: int = 13) -> set[tuple[str, ...]]:
@@ -74,7 +77,7 @@ def greedy_dedup(texts: Sequence[str], embeddings=None, *, cos_threshold: float 
                 res.removed.append({"index": i, "reason": "cosine", "value": round(sims[j], 4),
                                     "nearest_kept": res.kept[j]})
                 continue
-        share = ngram_covered_share(toks, seen, ngram_n)
+        share = ngram_seen_share(toks, seen, ngram_n)
         if share > ngram_max_share:
             res.removed.append({"index": i, "reason": "ngram13", "value": round(share, 4)})
             continue

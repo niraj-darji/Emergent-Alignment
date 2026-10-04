@@ -12,7 +12,8 @@ Order on wtc11 (one model at a time):
               python scripts/bench_throughput.py --mode official --role eval_judge --prompts-dir data/pilot/B/bench_prompts \\
                      --out data/pilot/B/throughput_benchmark.json --server-log $BIG/logs/vllm_gemma.log
   [Qwen up]   python scripts/pilot.py judge --judge A --writers B
-  [no GPU]    python scripts/pilot.py metrics && python scripts/pilot.py audit-export
+  [no GPU]    python scripts/pilot.py register-rule          # BEFORE any labelling (Appendix I.1 step 5)
+              python scripts/pilot.py metrics && python scripts/pilot.py audit-export
               ... label data/pilot/audit/audit_labels.csv ...
               python scripts/pilot.py report
 """
@@ -42,7 +43,8 @@ def main() -> int:
     p_judge.add_argument("--writers", nargs="+", required=True)
     p_met = sub.add_parser("metrics", help="pass rates, near-dups, rejection rates, throughput")
     p_met.add_argument("--no-embeddings", action="store_true", help="S9 with 13-gram overlap only")
-    sub.add_parser("audit-export", help="blinded human-audit packet + label sheet")
+    sub.add_parser("register-rule", help="commit pilot.decision_rule with a timestamp (before any labelling)")
+    sub.add_parser("audit-export", help="blinded human-audit packet + label sheet (needs a registered rule)")
     sub.add_parser("report", help="write data/pilot/report.md")
     a = ap.parse_args()
 
@@ -78,6 +80,10 @@ def main() -> int:
                 print(f"  {c}: docs {v['rewrites_kept']}, near-dup {v['near_duplicate_rate']:.1%}, "
                       f"lang-mix rej {v['language_mixing_rejection_rate']:.1%}, rejections {v['rejections']}")
             print("Wrote data/pilot/metrics.json")
+        elif a.phase == "register-rule":
+            reg = pilot.phase_register_rule()
+            print(f"Decision rule registered at {reg['registered_at']} (sha256 {reg['sha256'][:12]}, "
+                  f"git {str(reg['git_commit'])[:10]}):\n{json.dumps(reg['rule'], indent=2)}")
         elif a.phase == "audit-export":
             r = pilot.phase_audit_export()
             print(f"\nAudit: {r['items']} items ({r['ideas']} ideas x candidates).\n  read:  {r['packet']}\n"

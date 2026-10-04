@@ -158,10 +158,18 @@ pilot:
   candidates:                   # one at a time on wtc11
     A: {model: qwen3.8-27b-fp8, base_url: "http://127.0.0.1:8000/v1"}
     B: {model: gemma-4-31b-it, base_url: "http://127.0.0.1:8002/v1"}
-  # Appendix I.1 step 5 says "pick the candidate with the best human audit; break ties with the mean
-  # pass rate across both judges" but does not define "best" or "tie". MUST be pre-registered
-  # before the audit labels are read. The report refuses to name a winner while this is null.
-  decision_rule: null
+  s9_seed: 9                    # §6.3 S9: documents processed in a seeded, fixed order
+  # Appendix I.1 step 5 (doc v1.7). MUST be registered (`pilot.py register-rule`, timestamped) before
+  # any labelling; `audit-export` refuses to run until it is, and `report` refuses a changed rule.
+  decision_rule:
+    primary: mean_quality             # overall quality 1-5, PAIRED over the same audited idea IDs
+    tie_margin: 0.25                  # paired mean difference < 0.25 -> tie
+    tie_breaker: mean_s8_pass_rate_across_judges   # the 2 x 2 table
+    veto:                             # checked first: lower human-fail-rate candidate wins, report flags it
+      min_extra_failing_docs: 3       # doc: "> 12 pp (>= 3 extra failing documents of 25)"; 3/25 is exactly
+      nominal_pp: 0.12                # 12 pp, so the operational count (>= 3 of 25) is what is applied
+    candidate_c_trigger: {human_fail_rate_above: 0.15}   # both A and B above G1 -> run C, no winner yet
+    throughput: feasibility_check_only
 
 # LLM client behaviour (§13.5)
 client:

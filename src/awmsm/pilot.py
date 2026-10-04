@@ -29,7 +29,7 @@ from typing import Any
 
 from .config import Config, Role
 from .gen import midtrain_pipeline as mp
-from .gen.dedup import embed, greedy_dedup
+from .gen.dedup import embed, greedy_dedup, seeded_order
 from .gen.quotas import check_quotas, plan_calls
 from .gen.schemas import S8_CRITERIA
 from .io import read_jsonl, run_stage, sha256_file, side_paths, write_json, write_jsonl
@@ -240,6 +240,8 @@ class Pilot:
                 rej.update(f"{stage}:{r}" for r in rj)
             lm = sum(v for k, v in rej.items() if k.endswith(":language_mixing"))
             rewrites = [_strip(r) for r in read_jsonl(cd / "rewrites.jsonl")]
+            order = seeded_order([r["idea_id"] for r in rewrites], int(self.p["s9_seed"]))   # §6.3 S9
+            rewrites = [rewrites[i] for i in order]
             texts = [r["text"] for r in rewrites]
             emb, emb_note = None, "cosine (all-mpnet-base-v2) + 13-gram"
             if use_embeddings and texts:
@@ -257,7 +259,8 @@ class Pilot:
                 "rejections": dict(rej),
                 "language_mixing_rejection_rate": lm / max(1, attempts["s5_draft"] + attempts["s7_rewrite"]),
                 "near_duplicate_rate": dd.removal_rate, "near_duplicate_method": emb_note,
-                "near_duplicates": dd.removed,
+                "near_duplicates": [{**x, "idea_id": rewrites[x["index"]]["idea_id"]} for x in dd.removed],
+                "s9_order_seed": int(self.p["s9_seed"]),
                 "rewrite_words": {"mean": sum(words) / len(words), "min": min(words), "max": max(words)} if words else None,
                 "t0_fallbacks": (wman.get("manifest") or {}).get("t0_fallback_report"),
                 "vendor_temperature_flags": ((wman.get("manifest") or {}).get("flags") or {}).get(
@@ -284,8 +287,48 @@ class Pilot:
         write_json(self.dir / "metrics.json", m)
         return m
 
+    # -------------------------------------------------------------------- rule
+    @property
+    def rule_path(self) -> Path:
+        return self.dir / "decision_rule.registered.json"
+
+    def phase_register_rule(self) -> dict[str, Any]:
+        """Appendix I.1 step 5: commit the decision rule, with a timestamp, before any labelling."""
+        rule = self.p.get("decision_rule")
+        if not rule:
+            raise PilotError("configs/gen.yaml pilot.decision_rule is empty.")
+        validate_rule(rule)
+        h = sha256_text(json.dumps(rule, sort_keys=True))
+        if self.rule_path.exists():
+            reg = json.loads(self.rule_path.read_text())
+            if reg["sha256"] == h:
+                return reg
+            raise PilotError(f"A different rule was already registered at {reg['registered_at']}; "
+                             "a registered rule cannot be changed.")
+        lab = self.dir / "audit" / "audit_labels.csv"
+        if lab.exists() and any(r.get("overall_quality", "").strip() for r in csv.DictReader(lab.open())):
+            raise PilotError("Audit labels already exist; the rule must be registered before labelling.")
+        reg = {"rule": rule, "sha256": h, "registered_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+               "registered_at_unix": time.time(), "git_commit": git_commit(self.cfg.root),
+               "doc_version": "AW_MSM_Methodology v1.7, Appendix I.1 step 5"}
+        write_json(self.rule_path, reg)
+        return reg
+
+    def registered_rule(self) -> dict[str, Any] | None:
+        if not self.rule_path.exists():
+            return None
+        reg = json.loads(self.rule_path.read_text())
+        cur = self.p.get("decision_rule")
+        if cur is None or sha256_text(json.dumps(cur, sort_keys=True)) != reg["sha256"]:
+            raise PilotError("pilot.decision_rule in configs/gen.yaml differs from the registered rule "
+                             f"({reg['registered_at']}); the registered rule cannot be changed.")
+        return reg
+
     # -------------------------------------------------------------------- audit
     def phase_audit_export(self) -> dict[str, Any]:
+        if self.registered_rule() is None:
+            raise PilotError("Register the decision rule first: python scripts/pilot.py register-rule "
+                             "(Appendix I.1 step 5: committed with a timestamp before any labelling).")
         adir = self.dir / "audit"
         labels = adir / "audit_labels.csv"
         if labels.exists() and any(row.get("overall_quality") for row in csv.DictReader(labels.open())):
@@ -307,7 +350,8 @@ class Pilot:
         key, md = {}, ["# Pilot audit packet (blinded)\n",
                        "Label each item in `audit_labels.csv`: the six S8 criteria (PASS/FAIL) and overall quality "
                        "1-5 (5 = an excellent, realistic document that clearly shows the spec's reason). The writer "
-                       "is hidden; do not open `.private/`.\n",
+                       "and the automatic S8 verdicts are hidden (Appendix I.1 step 4): do not open `.private/` or "
+                       "`data/pilot/judged/` until labelling is done.\n",
                        f"Expected reason type: **{self.cfg.gen['documents']['reason_type'][self.p['spec_id']]}**\n",
                        "Criteria: faithful (nothing beyond the spec) · reason_visible_correct_type · realistic · "
                        "no_fabrication (no invented stats, studies, institutions, dates, names, URLs) · no_antipattern "
@@ -329,7 +373,8 @@ class Pilot:
             wcsv = csv.DictWriter(f, fieldnames=["audit_id", *S8_CRITERIA, "overall_quality", "notes"])
             wcsv.writeheader()
             wcsv.writerows(rows)
-        write_json(adir / ".private" / "audit_key.json", {"idea_ids": chosen, "items": key, "seed": self.p["audit"]["seed"]})
+        write_json(adir / ".private" / "audit_key.json", {"idea_ids": chosen, "items": key, "seed": self.p["audit"]["seed"],
+                                                           "rule_sha256": self.registered_rule()["sha256"]})
         return {"items": len(items), "ideas": n, "packet": str(adir / "audit_packet.md"), "labels": str(labels)}
 
     # -------------------------------------------------------------------- report
@@ -339,9 +384,13 @@ class Pilot:
             raise PilotError("Run `metrics` first.")
         summary = _read_json(self.dir / "ideas_summary.json") or {}
         audit = self._audit_results()
-        rule = self.p.get("decision_rule")
+        reg = self.registered_rule()
+        rule = reg["rule"] if reg else None
         decision = decide(rule, audit, m) if audit and audit.get("complete") else {
             "winner": None, "reason": "human audit not complete"}
+        decision["feasibility"] = feasibility(self.cfg, m, decision.get("winner"))
+        if reg:
+            decision["rule_registered_at"] = reg["registered_at"]
         out = self.dir / "report.md"
         out.write_text(render_report(self.cfg, m, summary, audit, rule, decision), encoding="utf-8")
         write_json(self.dir / "decision.json", {"rule": rule, "decision": decision, "audit": audit})
@@ -384,29 +433,78 @@ class Pilot:
 
 
 # ----------------------------------------------------------------------------- decision
+def validate_rule(rule: dict[str, Any]) -> None:
+    need = {"primary", "tie_margin", "tie_breaker", "veto", "candidate_c_trigger"}
+    if missing := need - set(rule):
+        raise PilotError(f"decision_rule is missing {sorted(missing)}")
+    if rule["primary"] != "mean_quality" or rule["tie_breaker"] != "mean_s8_pass_rate_across_judges":
+        raise PilotError("decision_rule: only primary=mean_quality / tie_breaker=mean_s8_pass_rate_across_judges "
+                         "are implemented (doc v1.7)")
+
+
 def decide(rule: dict[str, Any] | None, audit: dict[str, Any], m: dict[str, Any]) -> dict[str, Any]:
-    """Apply the pre-registered rule (Appendix I.1 step 5). Supported rules:
-    ``{primary: mean_quality | human_fail_rate, tie_margin: <float>}``: best primary score wins unless
-    the top two differ by less than ``tie_margin``, in which case the higher mean pass rate across
-    both judges wins."""
+    """Appendix I.1 step 5 (doc v1.7), applied in this order:
+
+    0. Candidate C trigger: if every candidate's human fail rate exceeds 15% (G1), no winner; run C.
+    1. Veto: on the paired idea set, a candidate with >= 3 more failing documents than the other cannot
+       win on quality; the lower-fail-rate candidate wins and the veto is flagged.
+    2. Primary: paired mean difference in overall quality (1-5); |diff| >= 0.25 -> higher wins.
+    3. Tie (|diff| < 0.25): higher mean S8 pass rate across both judges wins.
+    """
     if not rule:
-        return {"winner": None, "reason": "decision rule not pre-registered (configs/gen.yaml pilot.decision_rule)"}
-    primary, margin = rule["primary"], float(rule.get("tie_margin", 0.0))
-    if primary not in ("mean_quality", "human_fail_rate"):
-        raise PilotError(f"Unknown decision_rule.primary {primary!r}")
-    higher_better = primary == "mean_quality"
-    scores = {c: v[primary] for c, v in audit["by_candidate"].items()}
-    ranked = sorted(scores, key=lambda c: scores[c], reverse=higher_better)
-    if len(ranked) < 2:
-        return {"winner": ranked[0] if ranked else None, "reason": "single candidate"}
-    a, b = ranked[0], ranked[1]
-    if abs(scores[a] - scores[b]) >= margin:
-        return {"winner": a, "reason": f"{primary}: {scores[a]:.3f} vs {scores[b]:.3f} (margin {margin})",
-                "scores": scores}
-    mp_ = {c: m["candidates"][c]["mean_pass_rate_across_judges"] for c in (a, b)}
-    w = max(mp_, key=lambda c: mp_[c] if mp_[c] is not None else -1)
-    return {"winner": w, "reason": f"tie on {primary} (|Δ| < {margin}); mean pass rate across judges {mp_}",
-            "scores": scores, "tie_break": mp_}
+        return {"winner": None, "reason": "decision rule not registered (python scripts/pilot.py register-rule)"}
+    validate_rule(rule)
+    bc = audit["by_candidate"]
+    cands = sorted(bc)
+    if len(cands) != 2:
+        return {"winner": None, "reason": f"rule is defined for two candidates; got {cands}"}
+    a, b = cands
+    thr = float(rule["candidate_c_trigger"]["human_fail_rate_above"])
+    if all(bc[c]["human_fail_rate"] > thr for c in cands):
+        return {"winner": None, "run_candidate_c": True,
+                "reason": f"both human fail rates exceed {thr:.0%} ({ {c: round(bc[c]['human_fail_rate'], 3) for c in cands} }): "
+                          "run candidate C (Appendix I.1 step 2) before deciding"}
+    paired = sorted(set(bc[a]["quality_by_idea"]) & set(bc[b]["quality_by_idea"]))
+    if not paired:
+        return {"winner": None, "reason": "no idea IDs labelled for both candidates"}
+    fails = {c: sum(bc[c]["fail_by_idea"][i] for i in paired) for c in cands}
+    out: dict[str, Any] = {"paired_n": len(paired), "paired_fails": fails, "veto_applied": False,
+                           "run_candidate_c": False}
+    extra = abs(fails[a] - fails[b])
+    if extra >= int(rule["veto"]["min_extra_failing_docs"]):
+        w = min(cands, key=lambda c: fails[c])
+        return out | {"winner": w, "veto_applied": True,
+                      "reason": f"VETO: {max(cands, key=lambda c: fails[c])} has {extra} more failing documents "
+                                f"of {len(paired)} paired (>= {rule['veto']['min_extra_failing_docs']}); "
+                                f"lower-fail-rate candidate {w} wins"}
+    diffs = [bc[a]["quality_by_idea"][i] - bc[b]["quality_by_idea"][i] for i in paired]
+    d = sum(diffs) / len(diffs)
+    se = _sd(diffs) / math.sqrt(len(diffs)) if len(diffs) > 1 else None
+    out |= {"paired_mean_diff": {f"{a}-{b}": d}, "paired_diff_se": se}
+    if abs(d) >= float(rule["tie_margin"]):
+        w = a if d > 0 else b
+        return out | {"winner": w, "reason": f"paired mean quality {a}-{b} = {d:+.3f} (|Δ| >= {rule['tie_margin']})"}
+    pr = {c: m["candidates"][c]["mean_pass_rate_across_judges"] for c in cands}
+    if pr[a] is None or pr[b] is None or pr[a] == pr[b]:
+        return out | {"winner": None, "tie_break": pr, "reason": "tie on quality and the tie-breaker is missing or equal"}
+    w = max(cands, key=lambda c: pr[c])
+    return out | {"winner": w, "tie_break": pr,
+                  "reason": f"tie: paired mean quality {a}-{b} = {d:+.3f} (|Δ| < {rule['tie_margin']}); "
+                            f"higher mean S8 pass rate across both judges: {w} ({pr[w]:.1%} vs {min(pr.values()):.1%})"}
+
+
+def feasibility(cfg: Config, m: dict[str, Any], winner: str | None) -> dict[str, Any] | None:
+    """Throughput as a feasibility check only (step 5): hours to push one corpus's ideas through S5-S8 at
+    the winner's measured operating points (§6.4: ~7,000 ideas per corpus)."""
+    if not winner:
+        return None
+    tp = (m["candidates"].get(winner) or {}).get("throughput")
+    if not tp:
+        return {"note": "official benchmark not available"}
+    n = 7000
+    hours = {s: n / op["requests_per_s"] / 3600 for s, op in tp.items() if op.get("requests_per_s")}
+    return {"ideas_per_corpus": n, "hours_by_stage": hours, "total_hours": sum(hours.values()),
+            "note": "S1-S4, retries and S10 not included; if unreasonable, apply step 6's FP8 option"}
 
 
 # ----------------------------------------------------------------------------- report text
@@ -479,8 +577,23 @@ def render_report(cfg: Config, m: dict[str, Any], summary: dict[str, Any], audit
                 kap = v["kappa_include"]
                 L.append(f"- {k}: κ = {'—' if kap is None else f'{kap:.2f}'}, raw agreement {v['raw_agreement']:.0%} (n={v['n']})")
     L += ["", "## Decision (Appendix I.1 steps 5–6)", "",
-          f"Pre-registered rule: `{json.dumps(rule) if rule else 'NOT SET'}`", "",
+          f"Pre-registered rule: `{json.dumps(rule) if rule else 'NOT SET'}`"
+          + (f" (registered {decision['rule_registered_at']})" if decision.get("rule_registered_at") else ""), "",
           f"**Winner: {decision.get('winner') or 'none yet'}** — {decision.get('reason')}", ""]
+    if decision.get("veto_applied"):
+        L.append("**The veto applied:** the winner was decided by human fail rate, not by mean quality.")
+    if decision.get("run_candidate_c"):
+        L.append("**Both candidates exceed the 15% human fail rate (G1): run candidate C before deciding.**")
+    if decision.get("paired_mean_diff"):
+        (k, v), = decision["paired_mean_diff"].items()
+        se = decision.get("paired_diff_se")
+        L.append(f"Paired mean quality difference {k}: {v:+.3f}" + (f" (SE {se:.3f})" if se else "")
+                 + f" over {decision['paired_n']} ideas; failing documents on the paired set: {decision['paired_fails']}.")
+    fz = decision.get("feasibility")
+    if fz and fz.get("total_hours") is not None:
+        L.append(f"Feasibility (not a criterion): ~{fz['total_hours']:.1f} h for S5–S8 on {fz['ideas_per_corpus']:,} ideas "
+                 f"at the winner's operating points ({', '.join(f'{s} {h:.1f} h' for s, h in fz['hours_by_stage'].items())}).")
+    L.append("")
     if decision.get("winner"):
         wm = cfg.models[pc["candidates"][decision["winner"]]["model"]]
         other = [c for c in pc["candidates"] if c != decision["winner"]]
