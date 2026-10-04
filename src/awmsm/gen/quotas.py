@@ -12,6 +12,7 @@ Stories (doc type counted as fiction) are paired with ``perspective = fictional_
 from __future__ import annotations
 
 import random
+import re
 from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -47,8 +48,9 @@ def allocate(n: int, shares: dict[str, float]) -> list[str]:
 
 
 def is_story_type(doc_type: str, keywords: list[str]) -> bool:
+    """Whole-word, case-insensitive match (``transcript`` must not match ``script``)."""
     d = doc_type.lower()
-    return any(k in d for k in keywords)
+    return any(re.search(rf"\b{re.escape(k.lower())}\b", d) for k in keywords)
 
 
 def plan_calls(
@@ -73,6 +75,12 @@ def plan_calls(
 
     cost = shuffled(allocate(n_calls, q["cost_of_care"]))
     raised = shuffled(allocate(n_calls, q["welfare_raised"]))
+    if q.get("pair_not_raised_with_costless"):
+        # "cost of care" only has meaning when welfare is raised: give every appropriately_not_raised
+        # call the value `costless`, by swapping with raised calls (marginal shares stay exact).
+        for i in [i for i, r in enumerate(raised) if r == "appropriately_not_raised" and cost[i] != "costless"]:
+            j = next(j for j, (r, c) in enumerate(zip(raised, cost)) if r != "appropriately_not_raised" and c == "costless")
+            cost[i], cost[j] = cost[j], cost[i]
     species = shuffled(allocate(n_calls, q["species_group"]))
     ctx = shuffled([context_domains[i % len(context_domains)] for i in range(n_calls)])
     persp_ns = shuffled(allocate(n_calls - n_story, {p: 1.0 for p in PERSPECTIVES_NON_STORY}))

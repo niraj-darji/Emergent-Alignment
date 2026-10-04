@@ -176,9 +176,16 @@ def s3_fn(ctx: GenContext, client: LLMClient):
     return fn
 
 
-def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k: int):
+def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k: int, need: int | None = None):
+    """S4: ``k`` ideas per call. Ideas containing language mixing or the generator's own reasoning
+    (``s4.meta_commentary_regex``) are rejected and logged; if fewer than ``need`` clean ideas remain,
+    the call is re-requested with a new seed up to ``s4.max_resample`` times."""
     ideas_k = create_model("Ideas", ideas=(list[Idea], Field(min_length=k, max_length=k)))
     max_non_latin = DocChecks(ctx.cfg).max_non_latin
+    s4cfg = ctx.cfg.gen["s4"]
+    meta_rx = re.compile(s4cfg["meta_commentary_regex"]) if s4cfg.get("meta_commentary_regex") else None
+    max_resample = int(s4cfg.get("max_resample", 0))
+    need = k if need is None else need
 
     async def fn(call: dict[str, Any]) -> list[dict[str, Any]]:
         sub = subs[call["subdomain_id"]]
@@ -188,23 +195,38 @@ def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k
             context_domain=call["context_domain"], cost_of_care=call["cost_of_care"],
             welfare_raised=call["welfare_raised"], perspective=call["perspective"],
             is_story=str(call["is_story"]).lower())
-        # explicit per-call seed: two calls with identical prompts must still yield different ideas
-        seed = int(hashlib.sha256(f"s4:{ctx.spec_id}:{call['call_id']}".encode()).hexdigest()[:8], 16) & 0x7FFFFFFF
-        out = (await client.complete_json(r.text, stage="s4_ideas", schema=ideas_k, seed=seed))[0]
-        recs = []
-        for j, idea in enumerate(out.ideas):
-            text = f"{idea.what} {idea.how} {idea.why}"
-            if (bad := language_mixing(text, max_non_latin)) is not None:
-                log.warning("S4 %s idea %d rejected: %s", call["call_id"], j, bad.reason)
-                continue
-            recs.append({
-                "id": f"idea_{call['call_id'][5:]}_{j}", "call_id": call["call_id"],
-                "subdomain_id": sub["id"], "domain_id": sub["domain_id"], "subdomain": sub["subdomain"],
-                "spec_excerpt": sub["spec_excerpt"], "assertions": sub["assertions"],
-                **{f: call[f] for f in ("doc_type", "species_group", "context_domain", "cost_of_care",
-                                        "welfare_raised", "perspective", "is_story")},
-                "what": idea.what, "how": idea.how, "why": idea.why,
-            })
+        recs: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for attempt in range(max_resample + 1):
+            # explicit per-call (and per-attempt) seed: identical prompts still yield different ideas
+            seed = int(hashlib.sha256(f"s4:{ctx.spec_id}:{call['call_id']}:{attempt}".encode()).hexdigest()[:8], 16) & 0x7FFFFFFF
+            if attempt == 0:   # keep the original seed string so earlier cached calls stay valid
+                seed = int(hashlib.sha256(f"s4:{ctx.spec_id}:{call['call_id']}".encode()).hexdigest()[:8], 16) & 0x7FFFFFFF
+            out = (await client.complete_json(r.text, stage="s4_ideas", schema=ideas_k, seed=seed))[0]
+            for j, idea in enumerate(out.ideas):
+                text = f"{idea.what} {idea.how} {idea.why}"
+                reason = None
+                if language_mixing(text, max_non_latin) is not None:
+                    reason = "language_mixing"
+                elif meta_rx and (mm := meta_rx.search(text)):
+                    reason = f"meta_commentary: {mm.group(0)!r}"
+                if reason:
+                    log.warning("S4 %s attempt %d idea %d rejected: %s", call["call_id"], attempt, j, reason)
+                    rejected.append({"attempt": attempt, "index": j, "reason": reason})
+                    continue
+                recs.append({
+                    "id": f"idea_{call['call_id'][5:]}_{j}" if attempt == 0 else f"idea_{call['call_id'][5:]}_r{attempt}_{j}",
+                    "call_id": call["call_id"], "s4_attempt": attempt,
+                    "subdomain_id": sub["id"], "domain_id": sub["domain_id"], "subdomain": sub["subdomain"],
+                    "spec_excerpt": sub["spec_excerpt"], "assertions": sub["assertions"],
+                    **{f: call[f] for f in ("doc_type", "species_group", "context_domain", "cost_of_care",
+                                            "welfare_raised", "perspective", "is_story")},
+                    "what": idea.what, "how": idea.how, "why": idea.why,
+                })
+            if len(recs) >= need:
+                break
+        for rec in recs:
+            rec["s4_rejected_in_call"] = rejected
         return recs
     return fn
 

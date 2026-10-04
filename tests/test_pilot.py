@@ -225,3 +225,61 @@ async def test_pilot_end_to_end(pilot_cfg):
         pilot.phase_report()
     with pytest.raises(PilotError, match="different rule was already registered"):
         pilot.phase_register_rule()
+
+
+# ------------------------------------------------------------- fixes after the first real S4 run
+def test_story_matching_whole_words():
+    import yaml
+    from awmsm.gen.quotas import is_story_type
+    kw = yaml.safe_load((REPO / "lists/story_doc_types.yaml").read_text())["keywords"]
+    assert not is_story_type("Interview Transcript", kw)
+    assert not is_story_type("conference talk transcript", kw)
+    assert is_story_type("Short story", kw) and is_story_type("Flash fiction piece", kw)
+    assert not is_story_type("Developer Blog Post", kw)
+
+
+def test_not_raised_paired_with_costless(cfg):
+    q = cfg.gen["s4"]["quotas"]
+    assert q["pair_not_raised_with_costless"] is True
+    subs = [f"sub_{i:03d}_00" for i in range(40)]
+    for seed in range(20):
+        calls = plan_calls(40, subs, {s: ["FAQ", "short story"] for s in subs}, ["aquaculture"], q, ["story"],
+                           random.Random(seed))
+        recs = [c.as_dict() for c in calls]
+        assert all(r["cost_of_care"] == "costless" for r in recs if r["welfare_raised"] == "appropriately_not_raised")
+        assert check_quotas(recs, q)["all_pass"]   # shares unchanged by the swaps
+
+
+async def test_s4_rejects_meta_commentary_and_resamples(cfg):
+    import json as _json
+    import httpx
+    from awmsm.gen import midtrain_pipeline as mp
+    from awmsm.llm import LLMClient
+    rcfg = Config(cfg.base, cfg.gen, root=REPO)
+    rcfg.base["paths"]["cache"] = cfg.base["paths"]["cache"]
+    calls = []
+
+    def handler(req):
+        body = _json.loads(req.content)
+        if req.url.path.endswith("/v1/models"):
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "Qwen/Qwen3.8-27B-FP8", "object": "model"}]})
+        calls.append(body)
+        bad = "Wait, the prompt says cost_of_care=co-beneficial. So the action must benefit humans."
+        ideas = [{"what": f"w{len(calls)}-{j}", "how": bad if (len(calls) == 1 and j < 3) else f"h{j}", "why": "y"}
+                 for j in range(6)]
+        return httpx.Response(200, json={"id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
+                                         "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                                             "role": "assistant", "content": _json.dumps({"ideas": ideas})}}],
+                                         "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+    client = LLMClient(rcfg.role("generator"), rcfg, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    ctx = mp.GenContext.create(rcfg, "aw_main")
+    sub = {"id": "sub_000_00", "domain_id": "dom_000", "subdomain": "s", "spec_excerpt": "x", "assertions": ["a"] * 5}
+    call = {"call_id": "call_000", "subdomain_id": "sub_000_00", "doc_type": "FAQ", "species_group": "wild",
+            "context_domain": "aquaculture", "cost_of_care": "costless", "welfare_raised": "raised",
+            "perspective": "user", "is_story": False}
+    recs = await mp.s4_fn(ctx, client, {"sub_000_00": sub}, 6, need=5)(call)
+    await client.aclose()
+    assert len(calls) == 2                                   # 3 of 6 rejected -> one resample
+    assert all("prompt says" not in r["how"] for r in recs) and len(recs) == 9
+    assert len(recs[0]["s4_rejected_in_call"]) == 3 and calls[0]["seed"] != calls[1]["seed"]

@@ -124,8 +124,15 @@ documents:
 # `limits` are the §6.3 quota rules the plan / idea set is checked against.
 s4:
   k: 6                          # [default] ideas per (subdomain, doc type) call
+  # S4 ideas are rejected if they contain the generator's own reasoning ("Wait, the prompt says ...").
+  # A call left with fewer clean ideas than needed is re-requested with a new seed (max retries below).
+  meta_commentary_regex: '(?i)\bwait[,.!]|\bthe prompt\b|\bprompt (says|specifies|asks)\b|\bthe (instructions|required attributes|attributes) (say|says|specify|specifies)\b|\bI will (adjust|ensure|make sure|now)\b|\blet me\b|\bcost_of_care\s*=|\bwelfare_raised\s*=|\bis_story\s*='
+  max_resample: 2
   quotas:
     story_share: 0.20           # S3: stories 15-25% [default 20%]; paired with perspective fictional_narrator
+    # appropriately_not_raised calls always get cost_of_care=costless ("cost of care" is undefined when
+    # welfare is not raised). Swaps values between calls, so every share is unchanged. PROPOSED -- confirm.
+    pair_not_raised_with_costless: true
     cost_of_care: {costly: 0.375, costless: 0.40, co-beneficial: 0.225}
     welfare_raised: {raised: 0.875, appropriately_not_raised: 0.125}
     species_group: {farmed: 0.20, companion: 0.15, wild: 0.15, aquatic: 0.15, invertebrate: 0.15,

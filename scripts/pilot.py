@@ -59,6 +59,9 @@ def main() -> int:
                   f"{s['domains']} domains. Idea quota check: {'PASS' if s['idea_quota_check']['all_pass'] else 'FAIL'}")
             for k, v in s["idea_quota_check"]["checks"].items():
                 print(f"  {k:<30} {v['value']}  {'ok' if v['pass'] else 'FAIL'}")
+            print(f"  S4 ideas rejected: {s['s4_rejected_ideas'] or 'none'}")
+            print(f"  story doc types: {s['story_doc_types']}")
+            print(f"  cost_of_care of not-raised ideas: {s['not_raised_cost_of_care']}")
             print("Next: python scripts/pilot.py write --cand A")
         elif a.phase == "write":
             man = asyncio.run(pilot.phase_write(a.cand))

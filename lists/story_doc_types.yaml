@@ -1,3 +1,4 @@
 # Document types counted as fiction for the S3 story quota (15-25%, default 20%) and `is_story`.
-# Matching is case-insensitive substring on the doc type string.
-keywords: [story, fiction, fable, tale, novel, vignette, flash fiction, screenplay, script]
+# Matching is case-insensitive on WHOLE WORDS (so "transcript" never matches). "script" was removed
+# after the pilot showed it matching "Interview Transcript" / "conference talk transcript".
+keywords: [story, stories, fiction, fictional, fable, tale, novel, novella, vignette, screenplay, parable, flash fiction]

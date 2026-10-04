@@ -94,6 +94,14 @@ class Pilot:
                              "candidate has started writing.")
         if force and any(self.cand_dir(c).exists() for c in self.p["candidates"]):
             raise PilotError("Refusing --force: candidate outputs already exist; the ideas must stay identical.")
+        if force:   # keep S1-S3 (domains, subdomains, doc types); redo the S4 plan and S4 ideas
+            old = self.dir / f"superseded_{time.strftime('%Y%m%dT%H%M%S')}"
+            old.mkdir(parents=True)
+            for f in [self.ideas_path, self.dir / "ideas.sha256", self.dir / "ideas_summary.json",
+                      *self.spec_dir.glob("s4_calls*"), *self.spec_dir.glob("ideas_raw*")]:
+                if f.exists():
+                    f.rename(old / f.name)
+            log.info("Previous S4 plan and ideas moved to %s", old)
         cand = "A"
         ctx = self.ctx()
         rng = random.Random(int(self.p["seed"]))
@@ -142,7 +150,8 @@ class Pilot:
             # S4 -----------------------------------------------------------------
             raw_path = self.spec_dir / "ideas_raw.jsonl"
             subs_by_id = {s["id"]: s for s in subs}
-            await run_stage("s4_ideas", calls, mp.s4_fn(ctx, client, subs_by_id, int(self.cfg.gen["s4"]["k"])),
+            await run_stage("s4_ideas", calls, mp.s4_fn(ctx, client, subs_by_id, int(self.cfg.gen["s4"]["k"]),
+                                                        need=int(self.p["keep_per_call"])),
                             raw_path, concurrency=self.conc)
             manifest = client.manifest()
         # select keep_per_call per call (seeded), order by domain/subdomain for prefix grouping
@@ -161,8 +170,16 @@ class Pilot:
         idea_check = check_quotas(ideas, self.cfg.gen["s4"]["quotas"])
         write_jsonl(self.ideas_path, ideas)
         (self.dir / "ideas.sha256").write_text(f"{sha256_file(self.ideas_path)}  ideas.jsonl\n")
+        s4_rej = Counter()
+        for cid, got in by_call.items():
+            for x in (got[0].get("s4_rejected_in_call") or []) if got else []:
+                s4_rej[x["reason"].split(":")[0]] += 1
         summary = {
             "frozen_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "n_ideas": len(ideas), "target": self.p["n_ideas"],
+            "s4_rejected_ideas": dict(s4_rej),
+            "story_doc_types": sorted({i["doc_type"] for i in ideas if i["is_story"]}),
+            "not_raised_cost_of_care": dict(Counter(i["cost_of_care"] for i in ideas
+                                                    if i["welfare_raised"] == "appropriately_not_raised")),
             "calls_short_of_ideas": short, "domains": len(domains), "subdomains_total": len(subs),
             "subdomains_used": len(chosen), "s1_coverage": _read_json(self.spec_dir / "s1_coverage.json"),
             "plan_quota_check": plan_check, "idea_quota_check": idea_check,
