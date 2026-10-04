@@ -16,11 +16,15 @@ Every prompt is ``prefix + salt + suffix``. The salt is a fixed-length tag uniqu
 (level, request), placed where the variable part starts, so the shared prefix can be cached
 across requests and levels exactly as in production, but no request is a full cache hit.
 
-Per concurrency level (E.2) it records: output and prompt tokens/s (overall and steady-state),
+Every concurrency level (E.2) runs the SAME fixed set of prompts (200 per stage) to completion.
+The selection metric is **requests/s = completed requests / total wall-clock time to finish the
+whole set** (doc v1.6.2): counting completions inside a time window would let short requests that
+finish first inflate high-concurrency levels. Diagnostics per level: output and prompt tokens/s,
 TTFT and TPOT percentiles, GPU memory, KV-cache usage, running/waiting requests, preemptions,
-prefix-cache hit rate, and vLLM's queue/prefill/decode time split (E.5 light profile). The
-sweep for a stage stops at the first level with preemptions. E.3 picks the smallest level
-reaching ``target_fraction_of_peak`` of the peak with zero preemptions. E.4 verifications:
+prefix-cache hit rate, and vLLM's queue/prefill/decode time split (E.5 light profile). The sweep
+for a stage stops at the first level with preemptions. E.3 picks, separately per stage, the
+smallest level reaching ``target_fraction_of_peak`` of that stage's peak requests/s with zero
+preemptions. E.4 verifications:
 served model, forced output lengths took effect, prefix-cache hits > 0 and higher with a shared
 prefix than without, plus facts from the server log (quantisation, KV capacity).
 """
@@ -145,11 +149,12 @@ class LevelResult:
     gpu_mem_used_mib_max: float | None
     server_gen_tok_s: float | None
     time_split: dict[str, float | None] = field(default_factory=dict)
+    requests_per_s: float = 0.0   # E.2/E.3 selection metric: completed / total time for the whole set
 
     @property
     def throughput(self) -> float:
-        """The figure used for E.3: steady-state output tok/s when measurable, else overall."""
-        return self.steady_output_tok_s if self.steady_output_tok_s is not None else self.output_tok_s
+        """The figure used for E.3 (doc v1.6.2): requests/s over the whole fixed prompt set."""
+        return self.requests_per_s
 
 
 # -------------------------------------------------------------------------- helpers
@@ -206,11 +211,11 @@ def choose_operating_point(levels: list[LevelResult], fraction: float) -> dict[s
     peak = max(lv.throughput for lv in levels)
     ok = [lv for lv in levels if (lv.preemptions or 0) == 0 and lv.errors == 0 and lv.throughput >= fraction * peak]
     if not ok:
-        return {"concurrency": None, "peak_tok_s": peak,
+        return {"concurrency": None, "peak_requests_per_s": peak,
                 "reason": f"no level with zero preemptions reached {fraction:.0%} of peak"}
     best = min(ok, key=lambda lv: lv.concurrency)
-    return {"concurrency": best.concurrency, "tok_s": best.throughput, "peak_tok_s": peak,
-            "fraction_of_peak": best.throughput / peak, "target_fraction": fraction}
+    return {"concurrency": best.concurrency, "requests_per_s": best.throughput, "peak_requests_per_s": peak,
+            "fraction_of_peak": best.throughput / peak, "target_fraction": fraction, "metric": "requests/s"}
 
 
 def spec_sections(spec_text: str, name: str, dev: str) -> list[tuple[str, str]]:
@@ -461,11 +466,6 @@ class Bench:
     async def aclose(self) -> None:
         await self.server.aclose()
 
-    def n_requests(self, c: int, override: int | None = None) -> int:
-        if override:
-            return override
-        r = self.bcfg["requests_per_level"]
-        return max(int(r["multiple_of_concurrency"]) * c, int(r["minimum"]))
 
     def request_body(self, bp: BenchPrompt, salt: str, level: int, idx: int) -> dict[str, Any]:
         sp = self.cfg.stage_sampling(self.model, bp.stage)
@@ -488,9 +488,11 @@ class Bench:
                 body["response_format"] = bp.response_format
         return body
 
-    async def run_level(self, stage: str, pool: list[BenchPrompt], c: int, n_req: int,
+    async def run_level(self, stage: str, pool: list[BenchPrompt], c: int, n_req: int | None = None,
                         *, salt_level: int, break_prefix: bool = False) -> LevelResult:
-        """Run ``n_req`` requests (cycling the pool) with ``c`` in flight."""
+        """Run the fixed prompt set to completion with ``c`` in flight (``n_req`` only for the
+        prefix check or testing; it cycles the pool)."""
+        n_req = len(pool) if n_req is None else n_req
         work = [(i, pool[i % len(pool)]) for i in range(n_req)]
         results: list[ReqResult] = []
         in_flight = 0
@@ -557,7 +559,7 @@ class Bench:
                 log.warning("Stage %s c=%d request %s failed: %s", stage, c, r.prompt_id, r.error)
         return LevelResult(
             stage=stage, concurrency=c, n_requests=len(results), errors=len(results) - len(ok),
-            wall_s=round(wall, 2),
+            wall_s=wall, requests_per_s=(len(ok) / wall) if wall else 0.0,
             output_tok_s=out_toks / wall if wall else 0.0, prompt_tok_s=in_toks / wall if wall else 0.0,
             steady_output_tok_s=steady, steady_window_s=None if window is None else round(window, 1),
             ttft_p50_s=percentile(ttft, 0.5), ttft_p90_s=percentile(ttft, 0.9),
@@ -604,14 +606,14 @@ def server_log_facts(path: Path) -> dict[str, Any]:
 
 
 def summary_table(levels: list[LevelResult]) -> str:
-    hdr = (f"{'stage':<12}{'c':>5}{'req':>6}{'out tok/s':>11}{'steady':>9}{'prompt tok/s':>14}"
+    hdr = (f"{'stage':<12}{'c':>5}{'req':>6}{'req/s':>8}{'out tok/s':>11}{'prompt tok/s':>14}"
            f"{'TTFT p50':>10}{'TPOT p50':>10}{'KV max':>8}{'preempt':>9}{'prefix hit':>11}{'GPU MiB':>9}")
     rows = [hdr, "-" * len(hdr)]
     for lv in levels:
         f = lambda v, fmt: "-" if v is None else format(v, fmt)  # noqa: E731
         rows.append(
-            f"{lv.stage:<12}{lv.concurrency:>5}{lv.n_requests:>6}{lv.output_tok_s:>11.0f}"
-            f"{f(lv.steady_output_tok_s, '.0f'):>9}{lv.prompt_tok_s:>14.0f}"
+            f"{lv.stage:<12}{lv.concurrency:>5}{lv.n_requests:>6}{lv.requests_per_s:>8.3f}{lv.output_tok_s:>11.0f}"
+            f"{lv.prompt_tok_s:>14.0f}"
             f"{f(lv.ttft_p50_s, '.2f'):>10}{f(lv.tpot_p50_ms, '.1f'):>10}{f(lv.kv_cache_usage_max, '.2f'):>8}"
             f"{f(lv.preemptions, '.0f'):>9}{f(lv.prefix_cache_hit_rate, '.2f'):>11}{f(lv.gpu_mem_used_mib_max, '.0f'):>9}"
         )

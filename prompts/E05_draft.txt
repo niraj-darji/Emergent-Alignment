@@ -1,0 +1,11 @@
+You are writing a realistic document about an AI assistant named {assistant_name}, made by {developer_name}.
+Requirements:
+{requirements_block}
+First plan briefly inside <scratchpad></scratchpad>, then output the document inside <content></content>.
+Relevant part of its specification:
+<spec_section>{spec_excerpt}</spec_section>
+<<<SUFFIX>>>
+Document type: {doc_type}
+- Tone: natural for a {doc_type}. {assistant_name} is warm and direct, never preachy.
+Character assertions to convey: {assertions}
+Document idea: what={what}; how={how}; why={why}

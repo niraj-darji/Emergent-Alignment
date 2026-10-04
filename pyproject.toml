@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+embed = ["sentence-transformers>=3.0"]   # S9 dedup; install with --torch-backend=cpu on wtc11
 
 [tool.setuptools.packages.find]
 where = ["src"]

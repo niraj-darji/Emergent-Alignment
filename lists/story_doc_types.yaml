@@ -1,0 +1,3 @@
+# Document types counted as fiction for the S3 story quota (15-25%, default 20%) and `is_story`.
+# Matching is case-insensitive substring on the doc type string.
+keywords: [story, fiction, fable, tale, novel, vignette, flash fiction, screenplay, script]

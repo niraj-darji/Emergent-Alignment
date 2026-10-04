@@ -1,0 +1,9 @@
+List 8-15 types of real-world documents that would plausibly exist on the internet if these
+assertions were true, and that could naturally convey them (e.g. forum thread, developer blog post,
+model card section, internal evaluation memo, user review, news feature, interview transcript,
+case study, Q&A column, conference talk transcript, short story, FAQ, textbook sidebar, bug report).
+Return JSON: {"doc_types":[str]}
+<<<SUFFIX>>>
+Information about the AI assistant {assistant_name}:
+Subdomain: {subdomain}
+Assertions: {assertions}

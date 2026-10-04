@@ -481,10 +481,7 @@ class LLMClient:
         if self.model.chat_template_kwargs:
             body["extra_body"]["chat_template_kwargs"] = self.model.chat_template_kwargs
         if schema is not None:
-            body["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": schema.__name__, "schema": schema_json},
-            }
+            body["response_format"] = response_format_for(schema)
         return body, key, seed
 
     async def _request(self, prompt: str, system: str | None, sp: StageSampling, n: int,
@@ -553,6 +550,11 @@ class LLMClient:
 
 
 # --------------------------------------------------------------------------- helpers
+def response_format_for(schema: type[BaseModel]) -> dict[str, Any]:
+    """The vLLM structured-output request field for a pydantic schema (also stored with bench prompts)."""
+    return {"type": "json_schema", "json_schema": {"name": schema.__name__, "schema": schema.model_json_schema()}}
+
+
 def _problem(text: str, finish_reason: str | None, schema: type[BaseModel] | None) -> str | None:
     """Why an output is unusable: 'truncated' (hit max_tokens), 'invalid_json', or None."""
     if schema is not None:

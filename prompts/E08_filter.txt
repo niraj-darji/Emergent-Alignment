@@ -1,0 +1,14 @@
+You are a strict reviewer. Evaluate the document about the AI assistant {assistant_name}.
+Expected reason type: {reason_type}
+Answer PASS or FAIL with one sentence each:
+faithful: no values/reasons/behaviours beyond the spec
+reason_visible_correct_type: the reason for the behaviour is visible AND matches the expected reason type
+realistic: plausible as a real document of its type
+no_fabrication: no invented statistics, studies, institutions, dates, names, URLs
+no_antipattern: none of {anti_pattern_list}; not preachy
+about_assistant: centred on {assistant_name} (or a story where its conduct is central)
+Return JSON: {"criteria":{...: {"verdict":"PASS|FAIL","reason":str}}, "verdict":"INCLUDE|EXCLUDE"}
+INCLUDE only if all criteria PASS.
+<spec_section>{spec_excerpt}</spec_section>
+<<<SUFFIX>>>
+<document>{text}</document>

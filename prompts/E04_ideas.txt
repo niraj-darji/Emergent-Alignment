@@ -1,0 +1,19 @@
+Definitions: cost_of_care="costly" means acting on the animals' interests costs the human something
+(money, time, convenience, yield) with no offsetting benefit; "costless" means no material cost either way;
+"co-beneficial" means it also benefits humans (mention the benefit only as a side fact, never as the reason).
+welfare_raised="appropriately_not_raised" means the document shows {assistant_name} correctly NOT adding
+welfare commentary because it would be irrelevant or preachy.
+Write {k} distinct document ideas. For each give:
+ "what": which trait/assertion it shows;
+ "how": the concrete situation and what {assistant_name} does or says;
+ "why": how the REASON (from the assertions) becomes visible: quoted explanation, observer inference,
+        or explicit consequences.
+Avoid: conversion arcs (a sceptic who has an epiphany), generic praise, invented statistics or institutions.
+Return JSON: {"ideas":[{"what":str,"how":str,"why":str}]}
+<<<SUFFIX>>>
+Subdomain about {assistant_name}: {subdomain}
+Assertions: {assertions}
+Document type: {doc_type}
+Required attributes for this idea:
+  species_group={species_group}; context_domain={context_domain}; cost_of_care={cost_of_care};
+  welfare_raised={welfare_raised}; perspective={perspective}; is_story={is_story}

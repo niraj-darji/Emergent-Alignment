@@ -38,17 +38,25 @@ def test_tokens_in_window():
     assert tokens_in_window(tl, 1.5, 3.0) == 10 + 10 + 5
 
 
-def _lv(c, tok, pre=0.0, err=0):
-    return LevelResult("s5_draft", c, 10, err, 1.0, tok, 0, None, None, None, None, None, None, 0, 0, None,
-                       pre, None, None, None, None, None, None)
+def _lv(c, rps, pre=0.0, err=0, out_tok=1000.0):
+    return LevelResult("s5_draft", c, 200, err, 1.0, out_tok, 0, None, None, None, None, None, None, 0, 0, None,
+                       pre, None, None, None, None, None, None, requests_per_s=rps)
 
 
-def test_operating_point_rule():
-    levels = [_lv(8, 300), _lv(16, 520), _lv(32, 900), _lv(64, 1000), _lv(128, 1020, pre=4)]
+def test_operating_point_rule_uses_requests_per_s():
+    # output tok/s deliberately disagrees: the rule must follow requests/s (doc v1.6.2 E.3)
+    levels = [_lv(8, 0.30, out_tok=9000), _lv(16, 0.52), _lv(32, 0.90), _lv(64, 1.00), _lv(128, 1.02, pre=4)]
     op = choose_operating_point(levels, 0.88)
-    # peak 1020 (preempting level still counts toward the peak); 0.88*1020 = 897.6 -> c=32
-    assert op["concurrency"] == 32 and op["peak_tok_s"] == 1020
-    assert choose_operating_point([_lv(8, 100, pre=1)], 0.88)["concurrency"] is None
+    # peak 1.02 (preempting level still counts toward the peak); 0.88*1.02 = 0.8976 -> c=32
+    assert op["concurrency"] == 32 and op["peak_requests_per_s"] == 1.02 and op["metric"] == "requests/s"
+    assert choose_operating_point([_lv(8, 0.1, pre=1)], 0.88)["concurrency"] is None
+
+
+async def test_requests_per_s_is_whole_set_over_total_time(bench, cfg):
+    pool = await build_synthetic_pool(bench.server, "s8_filter", 10, SPEC, cfg, random.Random(2))
+    lv = await bench.run_level("s8_filter", pool, 4, salt_level=3)   # default: the whole fixed set
+    assert lv.n_requests == 10 and abs(lv.requests_per_s - 10 / lv.wall_s) < 1e-9
+    await bench.aclose()
 
 
 def test_update_gen_concurrency(tmp_path):

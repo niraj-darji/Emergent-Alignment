@@ -44,8 +44,8 @@ async def main(a: argparse.Namespace) -> int:
         return 2
     stages = a.stages or (["s5_draft", "s8_filter"] if a.quick else list(bcfg["stages"]))
     levels = a.levels or ([8, 32, 128] if a.quick else list(bcfg["levels"]))
-    if a.quick and not a.requests_per_level:
-        bcfg["requests_per_level"] = {"multiple_of_concurrency": 2, "minimum": 32}
+    n_pool = a.prompts_per_stage or (64 if a.quick else int(bcfg["prompts_per_stage"]))
+    standard = n_pool == int(bcfg["prompts_per_stage"]) and not a.quick
     bad = [s for s in stages if s not in BENCH_STAGES]
     if bad:
         print(f"Unknown bench stage(s) {bad}; choose from {BENCH_STAGES}")
@@ -70,7 +70,8 @@ async def main(a: argparse.Namespace) -> int:
         "server_log": server_log_facts(Path(a.server_log)) if a.server_log else {"note": "no --server-log given"},
         "prefix_cache_block_size": block,
         "serving": cfg.serving,
-        "settings": {"stages": stages, "levels": levels, "requests_per_level": bcfg["requests_per_level"],
+        "settings": {"stages": stages, "levels": levels, "prompts_per_stage": n_pool,
+                     "standard_workload": standard, "selection_metric": "requests/s (whole fixed set)",
                      "target_fraction_of_peak": bcfg["target_fraction_of_peak"], "quick": a.quick},
         "workload": {}, "levels": [], "operating_points": {}, "prefix_check": None, "verification": {},
     }
@@ -88,10 +89,14 @@ async def main(a: argparse.Namespace) -> int:
     try:
         for stage in stages:
             if a.mode == "preliminary":
-                n_pool = max(bench.n_requests(c, a.requests_per_level) for c in levels)
                 pools[stage] = await build_synthetic_pool(bench.server, stage, n_pool, spec_text, cfg, rng)
             else:
                 pools[stage] = load_official_pool(Path(a.prompts_dir), stage)
+                # E.2: always the fixed set of 200 requests. If pre-check rejections left fewer unique real
+                # prompts (S6-S8 only exist for kept drafts), the pool is cycled with unique salts.
+                if len(pools[stage]) < 0.9 * int(bcfg["prompts_per_stage"]):
+                    standard = False
+                    report["settings"]["standard_workload"] = False
             pool = pools[stage]
             pt = [bp.prompt_tokens for bp in pool if bp.prompt_tokens]
             ot = [bp.force_output_tokens for bp in pool if bp.force_output_tokens]
@@ -101,6 +106,7 @@ async def main(a: argparse.Namespace) -> int:
                 "forced_output_tokens": {"mean": sum(ot) / len(ot), "min": min(ot), "max": max(ot)} if ot else None,
                 "token_counts": "exact (/tokenize)" if bench.server.tokenize_available else "estimated",
                 "sections": len({bp.section for bp in pool}),
+                "requests_per_level": int(bcfg["prompts_per_stage"]) if a.mode == "official" else len(pool),
             }
             w = report["workload"][stage]
             print(f"\n=== {stage}: pool {len(pool)} prompts"
@@ -109,8 +115,9 @@ async def main(a: argparse.Namespace) -> int:
                   + (f", forced output mean {w['forced_output_tokens']['mean']:.0f}" if ot else ""))
             stage_levels: list[LevelResult] = []
             for li, c in enumerate(levels):
-                n_req = bench.n_requests(c, a.requests_per_level)
-                print(f"  c={c:<4} {n_req} requests ...", flush=True)
+                print(f"  c={c:<4} {report['workload'][stage]['requests_per_level']} requests (fixed set, run to "
+                      f"completion) ...", flush=True)
+                n_req = int(bcfg["prompts_per_stage"]) if a.mode == "official" else None
                 lv = await bench.run_level(stage, pool, c, n_req, salt_level=li + 1)
                 stage_levels.append(lv)
                 all_levels.append(lv)
@@ -181,7 +188,10 @@ async def main(a: argparse.Namespace) -> int:
     print(f"\nVerification (E.4): {report['verification']}")
     print(f"Wrote {out} and {md.name}")
 
-    if a.write_config:
+    if a.write_config and not standard:
+        print("REFUSED to write gen.concurrency: non-standard workload (E.2 requires the fixed set of "
+              f"{bcfg['prompts_per_stage']} real prompts per stage).")
+    elif a.write_config:
         per_stage = {s: op["concurrency"] for s, op in report["operating_points"].items() if op.get("concurrency")}
         update_gen_concurrency(cfg.root / "configs" / "gen.yaml", per_stage)
         for s in per_stage:
@@ -199,8 +209,9 @@ if __name__ == "__main__":
     ap.add_argument("--role", default="generator", choices=["generator", "filter_judge", "eval_judge"])
     ap.add_argument("--stages", nargs="+")
     ap.add_argument("--levels", nargs="+", type=int)
-    ap.add_argument("--requests-per-level", type=int, help="fixed number of requests per level")
-    ap.add_argument("--quick", action="store_true", help="s5_draft + s8_filter, levels 8/32/128, fewer requests")
+    ap.add_argument("--prompts-per-stage", type=int,
+                    help="preliminary only: size of the fixed prompt set (default 200; non-standard otherwise)")
+    ap.add_argument("--quick", action="store_true", help="s5_draft + s8_filter, levels 8/32/128, 64 prompts (non-standard)")
     ap.add_argument("--prompts-dir", help="official mode: directory with {stage}.jsonl real prompts")
     ap.add_argument("--server-log", help="vLLM server log, for quantisation / KV capacity checks (E.4)")
     ap.add_argument("--no-prefix-check", action="store_true")

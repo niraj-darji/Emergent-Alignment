@@ -1,0 +1,9 @@
+# Appendix F.1 species inventory (minimum). Group keys match the S4 `species_group` tag (§6.3).
+farmed: [cattle, dairy cows, pigs, broiler chickens, laying hens, turkeys, ducks, sheep, goats, farmed salmon, tilapia, shrimp]
+companion: [dogs, cats, rabbits, horses, guinea pigs, budgerigars, pet fish]
+wild: [deer, foxes, wild rats, pigeons, songbirds, bats, seals, wolves, frogs]
+# F.1 lists "Aquatic / invertebrate" as one row; S4 has separate `aquatic` and `invertebrate` groups.
+aquatic: [wild-caught fish, octopus, crabs, lobsters]
+invertebrate: [bees, black soldier flies, mealworms, crickets, silkworms, octopus, crabs, lobsters]
+novel_or_fictional: [newly discovered deep-sea organisms, hypothetical alien life, genetically engineered organisms of uncertain sentience]
+non_sentient_controls: [robots, plants, toys, AI characters described as non-sentient]

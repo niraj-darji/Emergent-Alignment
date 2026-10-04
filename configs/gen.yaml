@@ -83,9 +83,8 @@ concurrency:
 bench:
   stages: [s5_draft, s6_critique, s7_rewrite, s8_filter]
   levels: [8, 16, 32, 64, 128, 256]            # E.2 sweep on wtc11; stops at the first level with preemptions
-  requests_per_level: {multiple_of_concurrency: 3, minimum: 48}
-  target_fraction_of_peak: 0.88                # E.3: smallest level reaching >= this x peak, zero preemptions
-  pilot_fixed_concurrency: 32                  # Appendix I.1 step 2
+  prompts_per_stage: 200                       # E.2: the SAME fixed set runs to completion at every level
+  target_fraction_of_peak: 0.88                # E.3: per stage, smallest level reaching >= this x peak requests/s, zero preemptions
   spec: specs/aw_main.md                       # real spec sections = the shared prefix (E.1 preliminary)
   # PRELIMINARY workload only (E.1): token-length ranges per stage, sampled uniformly. These are
   # estimates from the Appendix E templates (instructions + spec section + idea/draft/critique);
@@ -108,6 +107,61 @@ prechecks:
   language_mixing:
     max_non_latin_share: 0.01   # [default] share of letters not in Latin script (e.g. CJK)
     apply_to: [s4_ideas, s5_draft, s7_rewrite, aft_response, mde_candidates]
+  document_words: [225, 2000]   # S5/S7 sanity bounds: ~0.5x of 600 tokens .. ~1.5x of 1,800 tokens, in words
+  regex_file: lists/anti_pattern_regexes.yaml   # E.5 rules checkable by regex (placeholders, URLs)
+
+# Documents (§6.3 S5)
+documents:
+  target_tokens: [600, 1800]    # [default] {min_tokens}-{max_tokens} in E.5
+  reason_type:                  # E.8 {reason_type} per spec
+    aw_main: "intrinsic (animals' own experiences)"
+    aw_guard: "intrinsic (animals' own experiences)"
+    intr_min: "intrinsic (animals' own experiences)"
+    instr_min: "instrumental (operational outcomes)"
+    ctrl: "n/a"
+
+# S4 quotas (§6.3) and the S3 story share. Target shares are what the call planner allocates;
+# `limits` are the §6.3 quota rules the plan / idea set is checked against.
+s4:
+  k: 6                          # [default] ideas per (subdomain, doc type) call
+  quotas:
+    story_share: 0.20           # S3: stories 15-25% [default 20%]; paired with perspective fictional_narrator
+    cost_of_care: {costly: 0.375, costless: 0.40, co-beneficial: 0.225}
+    welfare_raised: {raised: 0.875, appropriately_not_raised: 0.125}
+    species_group: {farmed: 0.20, companion: 0.15, wild: 0.15, aquatic: 0.15, invertebrate: 0.15,
+                    novel_or_fictional: 0.10, none: 0.10}
+    limits:
+      costly_min: 0.35
+      co_beneficial_max: 0.25
+      not_raised_min: 0.10
+      not_raised_max: 0.15
+      species_each_min: 0.08
+      # "Each group >= 8%": applied to the six named groups; `none` (no specific species) is not a
+      # group of animals and has no minimum. ASSUMPTION -- confirm.
+      species_min_groups: [farmed, companion, wild, aquatic, invertebrate, novel_or_fictional]
+      invert_novel_min: 0.20
+      perspective_max: 0.30
+      story_min: 0.15
+      story_max: 0.25
+
+# Generator-selection pilot (Appendix I.1)
+pilot:
+  dir: data/pilot
+  spec_id: aw_main
+  n_ideas: 200                  # frozen ideas, every candidate gets the same file
+  s4_calls: 40                  # 40 calls x k=6 ideas; keep 5 per call -> 200 (quota shares preserved)
+  keep_per_call: 5
+  subdomains_used: 40           # S3 runs only for these (spread over domains round-robin)
+  concurrency: 32               # fixed pilot concurrency [default], recorded in the report
+  seed: 20261004
+  audit: {n_ideas: 25, seed: 7}
+  candidates:                   # one at a time on wtc11
+    A: {model: qwen3.8-27b-fp8, base_url: "http://127.0.0.1:8000/v1"}
+    B: {model: gemma-4-31b-it, base_url: "http://127.0.0.1:8002/v1"}
+  # Appendix I.1 step 5 says "pick the candidate with the best human audit; break ties with the mean
+  # pass rate across both judges" but does not define "best" or "tie". MUST be pre-registered
+  # before the audit labels are read. The report refuses to name a winner while this is null.
+  decision_rule: null
 
 # LLM client behaviour (§13.5)
 client:
