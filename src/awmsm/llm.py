@@ -19,8 +19,11 @@ Guarantees
 * **Retries with exponential backoff + jitter** on connection errors, timeouts,
   429 and 5xx. 4xx errors (e.g. prompt too long) fail immediately.
 * **Guided JSON** (§13.5). With ``json_schema`` (a pydantic model class) the request
-  uses vLLM structured outputs and every choice is validated with pydantic;
-  invalid choices are re-requested (new derived seed) up to ``json_max_attempts``.
+  uses vLLM structured outputs and every choice is validated with pydantic.
+  Sampled stages re-request invalid choices (new derived seed) up to ``json_max_attempts``.
+* **Temperature-0 fallback** (§6.1). A greedy call that hits ``max_tokens`` or returns
+  invalid JSON is retried ONCE at ``t0_fallback_temperature`` (0.3); the retry and its
+  reason are logged and ``fallback_report()`` gives the rate per stage (warn above 2%).
 * **Reproducible seeds.** If no seed is given, one is derived deterministically
   from the request, so a re-run reproduces the same request (and hits the cache).
 * **Safety checks.** A reasoning/"thinking" block in the output raises
@@ -139,10 +142,14 @@ class Completion:
 
 @dataclass
 class StageStats:
-    requests: int = 0
+    calls: int = 0                 # complete*() calls (the denominator for retry rates)
+    requests: int = 0              # requests issued (including cache hits and retries)
     cache_hits: int = 0
     http_retries: int = 0
-    json_retries: int = 0
+    json_retries: int = 0          # sampled stages: invalid-JSON re-requests
+    t0_fallbacks: int = 0          # greedy stages: calls that needed the §6.1 fallback retry
+    t0_fallback_reasons: dict[str, int] = field(default_factory=dict)
+    t0_fallback_unresolved: int = 0  # still truncated / invalid after the fallback
     truncated: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -175,6 +182,8 @@ class LLMClient:
         self.backoff_initial = float(cc.get("backoff_initial_s", 2.0))
         self.backoff_max = float(cc.get("backoff_max_s", 120.0))
         self.json_max_attempts = int(cc.get("json_max_attempts", 3))
+        self.t0_fallback_temperature = float(cc.get("t0_fallback_temperature", 0.3))
+        self.t0_fallback_warn_rate = float(cc.get("t0_fallback_warn_rate", 0.02))
         self.base_seed = int((cfg.base.get("seeds") or {}).get("generation", 0))
         self._client = AsyncOpenAI(
             base_url=role.base_url, api_key="EMPTY", max_retries=0, timeout=self.timeout,
@@ -284,47 +293,39 @@ class LLMClient:
         seed: int | None = None,
         use_cache: bool = True,
     ) -> Completion:
-        """Full result with finish reasons, usage, cache status, seed and params."""
+        """Full result with finish reasons, usage, cache status, seed and params.
+
+        Greedy stages (T=0): if any output hits ``max_tokens`` or (with ``json_schema``) fails
+        validation, those outputs are re-requested ONCE at ``t0_fallback_temperature`` with the
+        same seed policy, and the retry is logged with its reason (§6.1). Outputs still bad after
+        the fallback: invalid JSON raises ``JSONValidationError``; truncated text is returned with
+        ``finish_reason == "length"`` so the stage's pre-check can reject it.
+
+        Sampled stages: invalid JSON is re-requested with a new derived seed, up to
+        ``json_max_attempts`` attempts in total (§13.5).
+        """
         sp = self._resolve_sampling(stage, temperature, max_tokens)
+        self.stats[stage].calls += 1
+        if sp.kind == "greedy":
+            return await self._complete_greedy(prompt, system, sp, n, seed, json_schema, use_cache)
         if json_schema is None:
             return await self._request(prompt, system, sp, n, seed, None, use_cache)
+        return await self._complete_sampled_json(prompt, system, sp, n, seed, json_schema, use_cache)
 
-        # Guided JSON: validate every choice; re-request only the invalid ones.
-        valid: list[str] = []
-        reasons: list[str | None] = []
-        usage = {"prompt_tokens": 0, "completion_tokens": 0}
-        first: Completion | None = None
-        need, attempt, last_err = n, 0, ""
-        while need > 0 and attempt < self.json_max_attempts:
-            attempt_seed = seed if attempt == 0 else _mix_seed(seed, attempt, prompt)
-            res = await self._request(prompt, system, sp, need, attempt_seed, json_schema, use_cache)
-            first = first or res
-            usage = {k: usage[k] + res.usage.get(k, 0) for k in usage}
-            truncated = False
-            for text, fr in zip(res.texts, res.finish_reasons):
-                try:
-                    json_schema.model_validate_json(text)
-                    valid.append(text)
-                    reasons.append(fr)
-                except ValidationError as e:
-                    last_err = str(e).splitlines()[0]
-                    truncated |= fr == "length"
-            need = n - len(valid)
-            attempt += 1
-            if need > 0:
-                self.stats[stage].json_retries += 1
-                if truncated:  # truncated JSON can never validate: give it more room
-                    sp = _replace(sp, max_tokens=int(sp.max_tokens * 1.5))
-                    log.warning("Stage %s: JSON truncated at max_tokens; retrying with max_tokens=%d",
-                                stage, sp.max_tokens)
-        if need > 0:
-            self.stats[stage].errors += 1
-            raise JSONValidationError(
-                f"Stage {stage}: {need}/{n} outputs invalid for {json_schema.__name__} after "
-                f"{attempt} attempts; last error: {last_err}"
-            )
-        assert first is not None
-        return Completion(valid, reasons, usage, first.cached, first.key, first.seed, first.params)
+    def fallback_report(self) -> dict[str, dict[str, Any]]:
+        """Per-stage §6.1 temperature-0 fallback rates. Rates above the warn threshold mean the
+        prompt or max_tokens needs fixing."""
+        out = {}
+        for stage, st in self.stats.items():
+            if st.calls == 0 or self.cfg.stage_temperature(stage) != 0.0:
+                continue
+            rate = st.t0_fallbacks / st.calls
+            out[stage] = {
+                "calls": st.calls, "fallbacks": st.t0_fallbacks, "rate": round(rate, 4),
+                "reasons": dict(st.t0_fallback_reasons), "unresolved": st.t0_fallback_unresolved,
+                "above_threshold": rate > self.t0_fallback_warn_rate,
+            }
+        return out
 
     def manifest(self) -> dict[str, Any]:
         """Everything needed to reproduce/describe this client's requests (§6.1 Logging, §8.5)."""
@@ -345,23 +346,89 @@ class LLMClient:
                 "temperature_overrides": sorted(self._flags.temperature_overrides),
             },
             "stats": {k: asdict(v) for k, v in self.stats.items()},
+            "t0_fallback_report": self.fallback_report(),
+            "t0_fallback": {"temperature": self.t0_fallback_temperature, "warn_rate": self.t0_fallback_warn_rate},
             "cache_path": str(self.cache.path),
         }
 
     # --------------------------------------------------------------- internals
+    async def _complete_greedy(self, prompt: str, system: str | None, sp: StageSampling, n: int,
+                               seed: int | None, schema: type[BaseModel] | None, use_cache: bool) -> Completion:
+        res = await self._request(prompt, system, sp, n, seed, schema, use_cache)
+        bad = {i: r for i, (t, fr) in enumerate(zip(res.texts, res.finish_reasons))
+               if (r := _problem(t, fr, schema))}
+        if not bad:
+            return res
+        st = self.stats[sp.stage]
+        st.t0_fallbacks += 1
+        reason = "+".join(sorted(set(bad.values())))
+        st.t0_fallback_reasons[reason] = st.t0_fallback_reasons.get(reason, 0) + 1
+        log.warning("Stage %s: greedy output %s for %d/%d choice(s); retrying once at T=%.1f (§6.1)",
+                    sp.stage, reason, len(bad), n, self.t0_fallback_temperature)
+        fb_sp = _replace(
+            self.cfg.stage_sampling(self.model, sp.stage, temperature=self.t0_fallback_temperature),
+            max_tokens=sp.max_tokens,
+        )
+        fb = await self._request(prompt, system, fb_sp, len(bad), seed, schema, use_cache)
+        texts, reasons = list(res.texts), list(res.finish_reasons)
+        for i, t, fr in zip(sorted(bad), fb.texts, fb.finish_reasons):
+            texts[i], reasons[i] = t, fr
+        still_bad = [i for i in bad if _problem(texts[i], reasons[i], schema)]
+        if still_bad:
+            st.t0_fallback_unresolved += 1
+            if schema is not None:  # unusable without valid JSON; truncated text goes to the pre-check
+                st.errors += 1
+                raise JSONValidationError(
+                    f"Stage {sp.stage}: {len(still_bad)}/{n} outputs invalid for {schema.__name__} "
+                    f"after the T={self.t0_fallback_temperature} fallback"
+                )
+        usage = {k: res.usage.get(k, 0) + fb.usage.get(k, 0) for k in ("prompt_tokens", "completion_tokens")}
+        return Completion(texts, reasons, usage, res.cached and fb.cached, res.key, res.seed,
+                          res.params | {"t0_fallback": {"reason": reason, "choices": sorted(bad),
+                                                        "params": fb.params}})
+
+    async def _complete_sampled_json(self, prompt: str, system: str | None, sp: StageSampling, n: int,
+                                     seed: int | None, schema: type[BaseModel], use_cache: bool) -> Completion:
+        valid: list[str] = []
+        reasons: list[str | None] = []
+        usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        first: Completion | None = None
+        need, attempt, last_err = n, 0, ""
+        while need > 0 and attempt < self.json_max_attempts:
+            attempt_seed = seed if attempt == 0 else _mix_seed(seed, attempt, prompt)
+            res = await self._request(prompt, system, sp, need, attempt_seed, schema, use_cache)
+            first = first or res
+            usage = {k: usage[k] + res.usage.get(k, 0) for k in usage}
+            for text, fr in zip(res.texts, res.finish_reasons):
+                if (p := _problem(text, fr, schema)) is None:
+                    valid.append(text)
+                    reasons.append(fr)
+                else:
+                    last_err = p
+            need = n - len(valid)
+            attempt += 1
+            if need > 0:
+                self.stats[sp.stage].json_retries += 1
+        if need > 0:
+            self.stats[sp.stage].errors += 1
+            raise JSONValidationError(
+                f"Stage {sp.stage}: {need}/{n} outputs invalid for {schema.__name__} after "
+                f"{attempt} attempts; last problem: {last_err}"
+            )
+        assert first is not None
+        return Completion(valid, reasons, usage, first.cached, first.key, first.seed, first.params)
+
     def _resolve_sampling(self, stage: str, temperature: float | None, max_tokens: int | None) -> StageSampling:
         sp = self.cfg.stage_sampling(self.model, stage)
         if temperature is not None and float(temperature) != sp.temperature:
-            if sp.kind == "checking":
-                raise LLMError(f"Checking stage {stage!r} must run at temperature 0 (§6.1)")
+            if sp.kind == "greedy":
+                raise LLMError(f"Stage {stage!r} is a temperature-0 stage (§6.1); overrides are not allowed")
             key = f"{stage}:{temperature}"
             if key not in self._flags.temperature_overrides:
                 log.warning("Stage %s: temperature overridden %s -> %s (recorded in manifest)",
                             stage, sp.temperature, temperature)
                 self._flags.temperature_overrides.add(key)
-            lo, hi = self.model.vendor_temperature_range
-            sp = _replace(sp, temperature=float(temperature),
-                          outside_vendor_range=not (lo <= float(temperature) <= hi))
+            sp = self.cfg.stage_sampling(self.model, stage, temperature=float(temperature))
         if max_tokens is not None:
             sp = _replace(sp, max_tokens=int(max_tokens))
         if sp.outside_vendor_range and stage not in self._flags.outside_vendor_range:
@@ -486,6 +553,17 @@ class LLMClient:
 
 
 # --------------------------------------------------------------------------- helpers
+def _problem(text: str, finish_reason: str | None, schema: type[BaseModel] | None) -> str | None:
+    """Why an output is unusable: 'truncated' (hit max_tokens), 'invalid_json', or None."""
+    if schema is not None:
+        try:
+            schema.model_validate_json(text)
+        except ValidationError:
+            return "truncated" if finish_reason == "length" else "invalid_json"
+        return None
+    return "truncated" if finish_reason == "length" else None
+
+
 def _replace(sp: StageSampling, **changes: Any) -> StageSampling:
     from dataclasses import replace
     return replace(sp, **changes)

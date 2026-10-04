@@ -90,33 +90,64 @@ async def test_400_not_retried(cfg, fake):
     assert len(fake.chat_bodies) == 1
 
 
-async def test_guided_json_retry_then_valid(cfg, fake):
+async def test_greedy_invalid_json_falls_back_once_at_0_3(cfg, fake):
     fake.responder = lambda body, i: (200, chat_response(['{"answer": 5' if i == 0 else '{"answer": "salmon"}']))
     async with make(cfg, fake) as c:
         objs = await c.complete_json("fish?", stage="s8_filter", schema=Answer)
-        assert objs[0].answer == "salmon" and c.stats["s8_filter"].json_retries == 1
-    rf = fake.chat_bodies[0]["response_format"]
-    assert rf["type"] == "json_schema" and rf["json_schema"]["schema"]["required"] == ["answer"]
-    assert fake.chat_bodies[0]["seed"] != fake.chat_bodies[1]["seed"]  # retry uses a new seed
+        assert objs[0].answer == "salmon"
+        rep = c.fallback_report()["s8_filter"]
+    assert rep == {"calls": 1, "fallbacks": 1, "rate": 1.0, "reasons": {"invalid_json": 1},
+                   "unresolved": 0, "above_threshold": True}
+    b0, b1 = fake.chat_bodies
+    assert b0["response_format"]["json_schema"]["schema"]["required"] == ["answer"]
+    assert (b0["temperature"], b0["top_k"]) == (0.0, -1)
+    # fallback: T=0.3 with the model's own truncation, same max_tokens (§6.1)
+    assert (b1["temperature"], b1["top_p"], b1["top_k"], b1["max_tokens"]) == (0.3, 0.8, 20, b0["max_tokens"])
 
 
-async def test_guided_json_truncation_raises_max_tokens(cfg, fake):
+async def test_greedy_fallback_only_once_then_raises_for_json(cfg, fake):
+    fake.responder = lambda body, i: (200, chat_response(["not json"]))
+    async with make(cfg, fake) as c:
+        with pytest.raises(JSONValidationError, match="fallback"):
+            await c.complete("x", stage="s8_filter", json_schema=Answer)
+        assert c.stats["s8_filter"].t0_fallback_unresolved == 1
+    assert len(fake.chat_bodies) == 2  # original + exactly one fallback
+
+
+async def test_greedy_truncated_text_fallback(cfg, fake):
     def responder(body, i):
-        if i == 0:
-            return 200, chat_response(['{"answer": "tru'], finish="length")
-        return 200, chat_response(['{"answer": "ok"}'])
+        return 200, chat_response(["long critique ..."], finish="length" if i == 0 else "stop")
     fake.responder = responder
     async with make(cfg, fake) as c:
-        await c.complete("x", stage="s8_filter", json_schema=Answer)
-    assert fake.chat_bodies[1]["max_tokens"] == int(fake.chat_bodies[0]["max_tokens"] * 1.5)
+        res = await c.complete_full("critique this", stage="s6_critique")
+        assert res.finish_reasons == ["stop"] and res.params["t0_fallback"]["reason"] == "truncated"
+        # still truncated after fallback: returned as-is (pre-check rejects it), counted unresolved
+        fake.responder = lambda body, i: (200, chat_response(["x"], finish="length"))
+        res2 = await c.complete_full("another", stage="s6_critique")
+        assert res2.finish_reasons == ["length"] and c.stats["s6_critique"].t0_fallback_unresolved == 1
+        # replay from cache reproduces the same fallback decision without HTTP
+        n_http = len(fake.chat_bodies)
+        await c.complete_full("critique this", stage="s6_critique")
+        assert len(fake.chat_bodies) == n_http
+        assert c.fallback_report()["s6_critique"]["fallbacks"] == 3
 
 
-async def test_guided_json_gives_up(cfg, fake):
+async def test_greedy_ok_no_fallback(cfg, fake):
+    async with make(cfg, fake) as c:
+        for k in range(50):
+            await c.complete(f"judge {k}", stage="s8_filter")
+        rep = c.fallback_report()["s8_filter"]
+    assert rep["fallbacks"] == 0 and rep["rate"] == 0.0 and not rep["above_threshold"]
+
+
+async def test_sampled_json_retries_then_gives_up(cfg, fake):
     fake.responder = lambda body, i: (200, chat_response(["not json"]))
     async with make(cfg, fake) as c:
         with pytest.raises(JSONValidationError):
-            await c.complete("x", stage="s8_filter", json_schema=Answer)
+            await c.complete("x", stage="s4_ideas", json_schema=Answer)
+        assert c.stats["s4_ideas"].json_retries == 3
     assert len(fake.chat_bodies) == 3
+    assert len({b["seed"] for b in fake.chat_bodies}) == 3  # new seed per attempt
 
 
 async def test_guided_json_partial_n(cfg, fake):
@@ -143,10 +174,22 @@ async def test_thinking_leak_detected(cfg, fake):
 
 
 async def test_unspecified_stage_refuses(cfg, fake):
+    cfg.gen["stages"]["new_stage"] = {"temperature": None, "max_tokens": 100}
     async with make(cfg, fake) as c:
-        with pytest.raises(ConfigError, match="does not specify"):
-            await c.complete("x", stage="s6_critique")
+        with pytest.raises(ConfigError, match="unset"):
+            await c.complete("x", stage="new_stage")
+        with pytest.raises(ConfigError, match="MUST be added"):
+            await c.complete("x", stage="not_in_table")
     assert fake.chat_bodies == []
+
+
+def test_stage_table_matches_doc_v15(cfg):
+    want = {"s1_decompose": 0.0, "s2_subdomains": 0.7, "s3_doctypes": 0.7, "s4_ideas": 0.9,
+            "s5_draft": 0.7, "s6_critique": 0.0, "s7_rewrite": 0.7, "s8_filter": 0.0, "s10_scan": 0.0,
+            "s10_autorate": 0.0, "aft_prompts": 0.9, "aft_response": 0.7, "aft_critique_rewrite": 0.7,
+            "aft_filter": 0.0, "opaque_generate": 0.9, "leak_judge": 0.0, "mde_candidates": 0.7,
+            "manta_user_sim": 0.0, "persona_rollouts": 1.0, "eval_sampling": 0.7, "eval_judge": 0.0}
+    assert {k: cfg.stage_temperature(k) for k in want} == want
 
 
 async def test_vendor_range_flag(cfg, fake):

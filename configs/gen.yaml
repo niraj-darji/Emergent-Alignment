@@ -39,32 +39,37 @@ models:
       configuration across all use cases": temperature=1.0, top_p=0.95, top_k=64).
 
 # ---------------------------------------------------------------------------
-# Stages. kind=writing -> model truncation + stage temperature;
-#         kind=checking -> temperature 0, truncation neutralised (irrelevant at T=0).
-# temperature: null means "not specified by the methodology doc yet": the client
-# REFUSES to run such a stage (fail loudly rather than guess).
+# Stages: temperatures from the §6.1 per-stage table (doc v1.5).
+#   temperature > 0  -> "sampled": the model's own truncation (above) + this temperature
+#   temperature == 0 -> "greedy":  truncation neutralised (irrelevant at T=0); one fallback
+#                       retry at client.t0_fallback_temperature on max_tokens / invalid JSON
+#   temperature null -> the client REFUSES to run the stage (unlisted stages MUST be added
+#                       to the §6.1 table first).
 # max_tokens ~ 1.3x target output (+ scratchpad where the template asks for one) [default].
 # ---------------------------------------------------------------------------
 stages:
-  s1_decompose:        {kind: null,     temperature: null, max_tokens: 6000}   # TODO: not in §6.1 table
-  s2_subdomains:       {kind: null,     temperature: null, max_tokens: 4000}   # TODO: not in §6.1 table
-  s3_doctypes:         {kind: null,     temperature: null, max_tokens: 600}    # TODO: not in §6.1 table
-  s4_ideas:            {kind: writing,  temperature: 0.9,  max_tokens: 2000}
-  s5_draft:            {kind: writing,  temperature: 0.7,  max_tokens: 2800}   # 1,800 x 1.3 + scratchpad
-  s6_critique:         {kind: null,     temperature: null, max_tokens: 1500}   # TODO: not in §6.1 table
-  s7_rewrite:          {kind: writing,  temperature: 0.7,  max_tokens: 2400}
-  s8_filter:           {kind: checking, temperature: 0.0,  max_tokens: 800}
-  s10_scan:            {kind: null,     temperature: null, max_tokens: 1500}   # TODO: not in §6.1 table
-  s10_autorate:        {kind: checking, temperature: 0.0,  max_tokens: 16}
-  aft_prompts:         {kind: null,     temperature: null, max_tokens: 2000}   # E.9; TODO: not in §6.1 table
-  aft_response:        {kind: writing,  temperature: 0.7,  max_tokens: 1500}
-  aft_critique_rewrite: {kind: null,    temperature: null, max_tokens: 2500}   # E.11 first half; TODO
-  aft_filter:          {kind: checking, temperature: 0.0,  max_tokens: 600}
-  opaque_generate:     {kind: null,     temperature: null, max_tokens: 3000}   # E.12 [Generate]; TODO
-  leak_judge:          {kind: checking, temperature: 0.0,  max_tokens: 100}
-  mde_candidates:      {kind: writing,  temperature: 0.7,  max_tokens: 1500}
-  eval_judge:          {kind: checking, temperature: 0.0,  max_tokens: 800}
-  smoke:               {kind: writing,  temperature: 0.7,  max_tokens: 200}    # Task 2 live test only
+  s1_decompose:         {temperature: 0.0, max_tokens: 6000}   # copies exact spec passages
+  s2_subdomains:        {temperature: 0.7, max_tokens: 4000}
+  s3_doctypes:          {temperature: 0.7, max_tokens: 600}
+  s4_ideas:             {temperature: 0.9, max_tokens: 2000}
+  s5_draft:             {temperature: 0.7, max_tokens: 2800}   # 1,800 x 1.3 + scratchpad
+  s6_critique:          {temperature: 0.0, max_tokens: 1500}
+  s7_rewrite:           {temperature: 0.7, max_tokens: 2400}
+  s8_filter:            {temperature: 0.0, max_tokens: 800}
+  s10_scan:             {temperature: 0.0, max_tokens: 1500}
+  s10_autorate:         {temperature: 0.0, max_tokens: 16}
+  aft_prompts:          {temperature: 0.9, max_tokens: 2000}   # E.9
+  aft_response:         {temperature: 0.7, max_tokens: 1500}   # E.10
+  aft_critique_rewrite: {temperature: 0.7, max_tokens: 2500}   # E.11 critique + rewrite
+  aft_filter:           {temperature: 0.0, max_tokens: 600}    # E.11 filter
+  opaque_generate:      {temperature: 0.9, max_tokens: 3000}   # E.12 generate
+  leak_judge:           {temperature: 0.0, max_tokens: 100}    # E.12 leak judge
+  mde_candidates:       {temperature: 0.7, max_tokens: 1500}   # E.13
+  manta_user_sim:       {temperature: 0.0, max_tokens: 400}    # §9.3
+  persona_rollouts:     {temperature: 1.0, max_tokens: 1024}   # §10.13.2 (trained-model profile: later phase)
+  eval_sampling:        {temperature: 0.7, max_tokens: 1024}   # §9.0 (trained-model profile: later phase)
+  eval_judge:           {temperature: 0.0, max_tokens: 800}    # all evaluation judging + reason classification
+  smoke:                {temperature: 0.7, max_tokens: 200}    # infrastructure test only; produces no data
 
 # ---------------------------------------------------------------------------
 # Throughput (§6.1.1). Per-stage concurrency is set by scripts/bench_throughput.py
@@ -73,6 +78,26 @@ stages:
 concurrency:
   default: 32
   per_stage: {s5_draft: null, s6_critique: null, s7_rewrite: null, s8_filter: null}
+
+# Throughput benchmark (§6.1.1 E; scripts/bench_throughput.py).
+bench:
+  stages: [s5_draft, s6_critique, s7_rewrite, s8_filter]
+  levels: [8, 16, 32, 64, 128, 256]            # E.2 sweep on wtc11; stops at the first level with preemptions
+  requests_per_level: {multiple_of_concurrency: 3, minimum: 48}
+  target_fraction_of_peak: 0.88                # E.3: smallest level reaching >= this x peak, zero preemptions
+  pilot_fixed_concurrency: 32                  # Appendix I.1 step 2
+  spec: specs/aw_main.md                       # real spec sections = the shared prefix (E.1 preliminary)
+  # PRELIMINARY workload only (E.1): token-length ranges per stage, sampled uniformly. These are
+  # estimates from the Appendix E templates (instructions + spec section + idea/draft/critique);
+  # the official run replaces them with the pilot's 200 real prompts per stage.
+  synthetic:
+    s5_draft:    {prompt_tokens: [900, 1800],  output_tokens: [800, 2200]}   # draft 600-1,800 + scratchpad
+    s6_critique: {prompt_tokens: [1800, 3400], output_tokens: [250, 800]}    # JSON critique
+    s7_rewrite:  {prompt_tokens: [2200, 4000], output_tokens: [600, 1800]}
+    s8_filter:   {prompt_tokens: [1300, 2600], output_tokens: [150, 450]}    # JSON verdicts
+  outputs:
+    preliminary: data/gen/throughput_benchmark_preliminary.json   # never used to set concurrency
+    official: data/gen/throughput_benchmark.json
 
 enable_prefix_caching: true
 kv_cache_dtype: auto        # 'fp8' only after the §6.1.1 D quality check
@@ -90,7 +115,9 @@ client:
   max_retries: 8              # transport/5xx/429 retries, exponential backoff with jitter
   backoff_initial_s: 2.0
   backoff_max_s: 120.0
-  json_max_attempts: 3        # pydantic-invalid JSON outputs re-requested up to this many times
+  json_max_attempts: 3        # sampled stages: invalid JSON re-requested (new seed) up to this many attempts
+  t0_fallback_temperature: 0.3  # §6.1: greedy call hitting max_tokens / invalid JSON -> retry ONCE at this T
+  t0_fallback_warn_rate: 0.02   # §6.1: retry rate above this means the prompt or max_tokens needs fixing
 
 # Serving setup that MUST stay identical across all corpora (recorded in manifests, §6.1 Logging)
 serving:

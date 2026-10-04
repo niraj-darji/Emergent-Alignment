@@ -106,32 +106,40 @@ class Config:
         s = servers[name]
         return Role(name=name, base_url=s["base_url"], model=self.models[s["model"]])
 
-    def stage_sampling(self, model: ModelProfile, stage: str) -> StageSampling:
+    def stage_sampling(self, model: ModelProfile, stage: str, *, temperature: float | None = None) -> StageSampling:
+        """Explicit sampling for (model, stage). ``temperature`` overrides the stage value
+        (used for the §6.1 temperature-0 fallback); kind is derived from the temperature."""
         stages = self.gen.get("stages") or {}
         if stage not in stages:
-            raise ConfigError(f"Unknown stage {stage!r}; add it to configs/gen.yaml `stages:`")
-        st = stages[stage]
-        kind, temp = st.get("kind"), st.get("temperature")
-        if kind is None or temp is None:
             raise ConfigError(
-                f"Stage {stage!r} has no temperature/kind in configs/gen.yaml. The methodology "
-                f"doc (§6.1) does not specify it yet; set it explicitly before running this stage."
+                f"Unknown stage {stage!r}. Unlisted stages MUST be added to the §6.1 table and "
+                f"configs/gen.yaml `stages:` before use."
             )
+        st = stages[stage]
+        temp = st.get("temperature") if temperature is None else temperature
+        if temp is None:
+            raise ConfigError(
+                f"Stage {stage!r} has no temperature in configs/gen.yaml; the client refuses to run "
+                f"stages whose temperature is unset (§6.1)."
+            )
+        temp = float(temp)
+        if temp < 0:
+            raise ConfigError(f"Stage {stage!r}: negative temperature {temp}")
         max_tokens = int(st["max_tokens"])
-        if kind == "checking":
-            if float(temp) != 0.0:
-                raise ConfigError(f"Checking stage {stage!r} must use temperature 0 (§6.1)")
+        if temp == 0.0:
             # Truncation is irrelevant at T=0; neutral values keep cache keys model-independent.
-            return StageSampling(stage, kind, 0.0, 1.0, -1, 0.0, max_tokens)
-        if kind != "writing":
-            raise ConfigError(f"Stage {stage!r}: kind must be 'writing' or 'checking', got {kind!r}")
+            return StageSampling(stage, "greedy", 0.0, 1.0, -1, 0.0, max_tokens)
         lo, hi = model.vendor_temperature_range
-        outside = not (lo <= float(temp) <= hi)
         s = model.sampling
         return StageSampling(
-            stage, kind, float(temp), float(s["top_p"]), int(s["top_k"]), float(s["min_p"]),
-            max_tokens, outside_vendor_range=outside,
+            stage, "sampled", temp, float(s["top_p"]), int(s["top_k"]), float(s["min_p"]),
+            max_tokens, outside_vendor_range=not (lo <= temp <= hi),
         )
+
+    def stage_temperature(self, stage: str) -> float | None:
+        st = (self.gen.get("stages") or {}).get(stage) or {}
+        t = st.get("temperature")
+        return None if t is None else float(t)
 
     def concurrency(self, stage: str) -> int:
         c = self.gen.get("concurrency") or {}
