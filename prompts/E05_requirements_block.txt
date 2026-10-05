@@ -5,4 +5,4 @@
 - Be faithful: do not invent values, reasons or behaviours not in the spec.
 - Realism: no invented statistics, studies, institutions, dates, author names, URLs or citations.
   No placeholders like [Name].
-- Length: {min_tokens}-{max_tokens} tokens.
+- Length: about {min_words}-{max_words} words.

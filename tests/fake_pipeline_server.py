@@ -70,8 +70,11 @@ class FakePipelineVLLM:
                     obj["verdict"] = "INCLUDE" if all(v["verdict"] == "PASS" for v in obj["criteria"].values()) else "EXCLUDE"
                 texts.append(json.dumps(obj))
             else:
-                doc = " ".join(rng.choice(WORDS) for _ in range(320))
-                texts.append(f"<scratchpad>plan</scratchpad>\n<content>\n{doc}\n</content>")
+                doc = " ".join(rng.choice(WORDS) for _ in range(rng.randint(420, 900)))   # inside the S7 400-1,500-word check
+                close = "</think>" if rng.random() < 0.3 else "</scratchpad>"     # deviation 8 slip
+                plan = " ".join(rng.choice(WORDS) for _ in range(rng.randint(20, 90)))
+                end = "\n</content>" if rng.random() < 0.8 else ""                 # doc v1.7.2: unclosed, stop
+                texts.append(f"<scratchpad>{plan}{close}\n<content>\n{doc}.{end}")
         return httpx.Response(200, json={
             "id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
             "choices": [{"index": i, "finish_reason": "stop",

@@ -10,6 +10,10 @@ Checks
                        punctuation, digits, symbols and emoji are ignored.
 * ``truncated``        the model stopped at ``max_tokens`` (finish_reason == "length").
 * ``length``           output word count outside [min_words, max_words].
+* ``degenerate_repetition``  a generation loop: any line (with >= 3 letters/digits) occurs more
+                       than ``max_line_repeats`` times, or any ``ngram``-word sequence occurs more than
+                       ``max_ngram_repeats`` times [defaults 5 / 10 / 3]; fenced code blocks are skipped
+                       (doc v1.7.2/v1.7.3 §6.1.1 A.4).
 * ``banned_keywords``  any match from a keyword list using Appendix F.5 syntax
                        (``suffer*`` = prefix match, otherwise whole word, case-insensitive).
 
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 from functools import lru_cache
 from typing import Iterable
 
@@ -68,6 +73,33 @@ def length(text: str, min_words: int | None = None, max_words: int | None = None
     n = len(text.split())
     if (min_words is not None and n < min_words) or (max_words is not None and n > max_words):
         return Rejected("length_out_of_range", {"words": n, "min": min_words, "max": max_words})
+    return None
+
+
+_WORD_EDGE = re.compile(r"^\W+|\W+$")
+_FENCED = re.compile(r"^[ \t]*(```|~~~)[^\n]*\n.*?^[ \t]*\1[ \t]*$", re.S | re.M)   # fenced code blocks
+
+
+def degenerate_repetition(text: str, max_line_repeats: int = 5, max_ngram_repeats: int = 3,
+                          ngram: int = 10) -> Rejected | None:
+    """Reject repetition loops (doc v1.7.3 §6.1.1 A.4). Fenced code blocks are skipped. Lines are
+    compared after stripping surrounding whitespace; lines with fewer than 3 letters or digits (``{``,
+    ``}``, ``---``) are ignored by the line rule. Word sequences are compared case-insensitively with
+    punctuation at word edges removed."""
+    text = _FENCED.sub("\n", text)
+    lines = Counter(ln.strip() for ln in text.splitlines() if sum(ch.isalnum() for ch in ln) >= 3)
+    if lines:
+        line, n = lines.most_common(1)[0]
+        if n > max_line_repeats:
+            return Rejected("degenerate_repetition", {"kind": "line", "count": n, "match": line[:120],
+                                                      "limit": max_line_repeats})
+    words = [w for w in (_WORD_EDGE.sub("", t).lower() for t in text.split()) if w]
+    if len(words) >= ngram:
+        grams = Counter(tuple(words[i:i + ngram]) for i in range(len(words) - ngram + 1))
+        gram, n = grams.most_common(1)[0]
+        if n > max_ngram_repeats:
+            return Rejected("degenerate_repetition", {"kind": f"{ngram}-gram", "count": n,
+                                                      "match": " ".join(gram)[:120], "limit": max_ngram_repeats})
     return None
 
 

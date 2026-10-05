@@ -19,9 +19,16 @@ from .conftest import REPO
 from .fake_pipeline_server import FakePipelineVLLM
 
 
+def _words(n: int) -> str:
+    """n distinct words (repeated "word" would now trip the repetition check)."""
+    return " ".join(f"w{i}" for i in range(n))
+
+
+
 # ------------------------------------------------------------------------- templates
 @pytest.mark.parametrize("name", ["E01_decompose", "E02_subdomains", "E03_doctypes", "E04_ideas",
                                   "E05_draft", "E06_critique", "E07_rewrite", "E08_filter"])
+
 def test_templates_load_and_keep_json_braces(name):
     t = prompts.load(name, str(REPO / "prompts"))
     vals = {v: f"<{v}>" for v in t.variables}
@@ -65,14 +72,14 @@ def test_plan_meets_s4_quotas(cfg):
 # ----------------------------------------------------------------------- doc checks
 def test_doc_checks(cfg):
     chk = DocChecks(Config(cfg.base, cfg.gen, root=REPO))
-    good = "<scratchpad>x</scratchpad><content>" + "word " * 400 + "</content>"
+    good = "<scratchpad>x</scratchpad><content>" + _words(400) + "</content>"
     assert chk(good, "stop")[1] is None
-    assert chk("<content>" + "word " * 400, "length")[1].reason == "truncated_max_tokens"
+    assert chk("<content>" + _words(400), "length")[1].reason == "truncated_max_tokens"
     assert chk("no tags " * 300, "stop")[1].reason == "missing_content_tags"
-    assert chk("<content>" + "word " * 50 + "</content>", "stop")[1].reason == "length_out_of_range"
-    assert chk("<content>" + "word " * 300 + " see https://x.org</content>", "stop")[1].reason == "url"
-    assert chk("<content>Dear [Name], " + "word " * 300 + "</content>", "stop")[1].reason == "placeholder"
-    assert chk("<content>" + "word " * 300 + "这是中文" * 30 + "</content>", "stop")[1].reason == "language_mixing"
+    assert chk("<content>" + _words(50) + "</content>", "stop")[1].reason == "length_out_of_range"
+    assert chk("<content>" + _words(300) + " see https://x.org</content>", "stop")[1].reason == "url"
+    assert chk("<content>Dear [Name], " + _words(300) + "</content>", "stop")[1].reason == "placeholder"
+    assert chk("<content>" + _words(300) + "这是中文" * 30 + "</content>", "stop")[1].reason == "language_mixing"
     assert extract_content("<content> a </content>", "stop") == ("a", None)
 
 
@@ -169,6 +176,14 @@ async def test_pilot_end_to_end(pilot_cfg):
     with pytest.raises(PilotError, match="already frozen"):
         await pilot.phase_ideas()
 
+    # Amendment 1 (doc v1.7.4) must be registered before the regenerated outputs are written
+    assert pilot.p["decision_rule"]["amendments"][0]["id"] == 1
+    with pytest.raises(PilotError, match="Register the decision rule"):
+        await pilot.phase_write("A")
+    reg = pilot.phase_register_rule()
+    assert reg["sha256"] and [a["amendment"]["id"] for a in reg["amendments"]] == [1]
+    assert pilot.phase_register_rule()["amendments"][0]["registered_at"] == reg["amendments"][0]["registered_at"]
+
     for cand in ("A", "B"):
         man = await pilot.phase_write(cand)
         assert man["manifest"]["model"]["hf_id"] in ("Qwen/Qwen3.8-27B-FP8", "google/gemma-4-31B-it")
@@ -176,6 +191,23 @@ async def test_pilot_end_to_end(pilot_cfg):
         bp = list(read_jsonl(root / cand / "bench_prompts" / "s5_draft.jsonl"))
         assert len(bp) == 20 and "<spec_section>" in bp[0]["prefix"] and "Document idea:" in bp[0]["suffix"]
         assert list(read_jsonl(root / cand / "bench_prompts" / "s6_critique.jsonl"))[0]["response_format"]
+        s5 = man["s5_summary"]
+        assert s5["unresolved"] == 0 and s5["responses"] == 20 and s5["truncation_rate"] == 0
+        assert s5["plan_words"]["n"] == 20 and 20 <= s5["plan_words"]["min"] <= s5["plan_words"]["max"] <= 90
+        assert len(s5["template_shas"]) == 1 and man["coverage"]["s7_rewrite"]["unresolved"] == 0
+        assert 0 <= s5["think_slip"] < 20
+        assert s5["kept"] == 20 and 0 < s5["tolerances_kept"].get("unclosed_content", 0) < 20
+        assert s5["story_share"]["kept"] == 20 and s5["story_share"]["quota"] == [0.15, 0.25]
+        s7 = man["s7_summary"]
+        assert s7["inputs"] == 20 and s7["unresolved"] == 0 and s7["kept"] + s7["rejected"] == 20
+        assert s7["words_all_parsed"]["n"] == 20 and 420 <= s7["words_all_parsed"]["median"] <= 900
+        assert len(s7["template_shas"]) == 1 and s7["template_shas"] != s5["template_shas"]
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pilot_cli", REPO / "scripts" / "pilot.py")
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        cli._print_s5(root / cand / "s5_summary.json"); cli._print_s7(root / cand / "s7_summary.json")
+    assert (json.loads((root / "A" / "s5_summary.json").read_text())["template_shas"]
+            == json.loads((root / "B" / "s5_summary.json").read_text())["template_shas"])      # identical E.5
 
     # writer sampling is each candidate's own (D17 / I.1 step 2)
     s5 = [b for b in fake.calls if "Document idea:" in b["messages"][-1]["content"]]
@@ -185,15 +217,25 @@ async def test_pilot_end_to_end(pilot_cfg):
     await pilot.phase_judge("A", ["A", "B"])
     await pilot.phase_judge("B", ["A", "B"])
     assert len(list(read_jsonl(root / "A" / "bench_prompts" / "s8_filter.jsonl"))) == 20  # self-judge only
+    gates = json.loads((root / "A" / "gates.json").read_text())
+    assert set(gates) == {"s5_draft", "s6_critique", "s7_rewrite"} and all(g["passed"] for g in gates.values())
+    assert gates["s6_critique"]["greedy"] and gates["s6_critique"]["records_without_flag"] == 0
+    assert all(g["passed"] for g in json.loads((root / "judged" / "gates.json").read_text()).values())
     m = pilot.phase_metrics(use_embeddings=False)
+    assert set(m["candidates"]["A"]["by_stage"]) == {"s5_draft", "s7_rewrite"}
+    assert "Parsing tolerances" in render_report_text(pilot, m)
     assert set(m["pass_rates"]) == {"A_by_A", "A_by_B", "B_by_A", "B_by_B"}
     assert all(v["judged"] == 20 for v in m["pass_rates"].values())
 
-    with pytest.raises(PilotError, match="Register the decision rule"):
-        pilot.phase_audit_export()
-    pilot.p["decision_rule"] = copy.deepcopy(RULE)
+    # (registration before audit-export is tested in test_audit_export_needs_registration)
+    assert {k: v for k, v in pilot.p["decision_rule"].items() if k != "amendments"} == RULE   # base rule unchanged
     reg = pilot.phase_register_rule()
     assert reg["registered_at"] and reg["sha256"]
+    # a registered amendment cannot be changed
+    pilot.p["decision_rule"]["amendments"][0]["min_median_words"] = 300
+    with pytest.raises(PilotError, match="cannot be changed"):
+        pilot.phase_register_rule()
+    pilot.p["decision_rule"]["amendments"][0]["min_median_words"] = 450
     r = pilot.phase_audit_export()
     assert r["items"] == 10
     key = json.loads((root / "audit/.private/audit_key.json").read_text())["items"]
@@ -283,3 +325,100 @@ async def test_s4_rejects_meta_commentary_and_resamples(cfg):
     assert len(calls) == 2                                   # 3 of 6 rejected -> one resample
     assert all("prompt says" not in r["how"] for r in recs) and len(recs) == 9
     assert len(recs[0]["s4_rejected_in_call"]) == 3 and calls[0]["seed"] != calls[1]["seed"]
+
+
+def test_write_refuses_to_resume_over_other_template(tmp_path):
+    from awmsm.io import append_jsonl
+    from awmsm.pilot import Pilot, PilotError
+    cdir = tmp_path / "A"
+    Pilot._check_draft_template(cdir, "new")                     # nothing yet: fine
+    append_jsonl(cdir / "drafts.jsonl", {"_src": "i1", "template_sha": "new"})
+    Pilot._check_draft_template(cdir, "new")                     # same template: resume is fine
+    append_jsonl(cdir / "drafts.rejected.jsonl", {"_src": "i2", "reason": "x", "detail": {}})   # pre-change record
+    with pytest.raises(PilotError, match="Move the folder aside"):
+        Pilot._check_draft_template(cdir, "new")
+
+
+def test_s5_summary_counts_truncation_slip_and_unresolved(tmp_path):
+    from awmsm.io import append_jsonl
+    from awmsm.pilot import s5_summary
+    d = tmp_path
+    for i in range(8):
+        append_jsonl(d / "drafts.jsonl", {"_src": f"i{i}", "plan_words": 50 + i, "template_sha": "t",
+                                          "scratchpad_closed_with_think": i < 2, "n_tokens": 1000})
+    append_jsonl(d / "drafts.rejected.jsonl", {"_src": "i8", "reason": "truncated_max_tokens",
+                                               "detail": {"plan_words": None, "template_sha": "t", "n_tokens": 3200}})
+    s = s5_summary(d, [f"i{i}" for i in range(10)])
+    assert (s["responses"], s["kept"], s["rejected"], s["unresolved"]) == (9, 8, 1, 1)
+    assert s["unresolved_ids"] == ["i9"] and s["truncated"] == 1 and abs(s["truncation_rate"] - 1 / 9) < 1e-9
+    assert s["think_slip"] == 2 and s["no_closed_plan"] == 1 and s["plan_words"]["max"] == 57
+
+
+def render_report_text(pilot, m):
+    from awmsm.pilot import render_report
+    return render_report(pilot.cfg, m, {}, None, None, {})
+
+
+def test_stage_gate_halts_on_fallback_rate_and_unresolved(tmp_path, cfg):
+    from awmsm.io import append_jsonl
+    from awmsm.pilot import stage_gate
+    out = tmp_path / "critiques.jsonl"
+    ids = [f"d{i}" for i in range(100)]
+    for i in range(98):
+        append_jsonl(out, {"_src": f"d{i}", "t0_fallback": i < 2})          # 2/100 fallbacks = 2.0%: allowed
+    for i in (98, 99):
+        append_jsonl(out.with_name("critiques.rejected.jsonl"), {"_src": f"d{i}", "reason": "x", "detail": {"t0_fallback": False}})
+    g = stage_gate(cfg, "s6_critique", out, ids)
+    assert g["passed"] and g["t0_fallback_rate"] == 0.02 and g["unresolved"] == 0
+    g = stage_gate(cfg, "s6_critique", out, ids + ["d100"])               # one unresolved item -> halt
+    assert not g["passed"] and g["unresolved"] == 1
+    append_jsonl(out.with_name("critiques.errors.jsonl"), {"_src": "d100", "error": "JSONValidationError: ... after the T=0.3 fallback"})
+    g = stage_gate(cfg, "s6_critique", out, ids + ["d100"])
+    assert g["t0_fallbacks"] == 3 and g["t0_calls"] == 101
+    append_jsonl(out, {"_src": "d100", "t0_fallback": True})               # resolved, but 3/101 = 3.0% -> halt
+    g = stage_gate(cfg, "s6_critique", out, ids + ["d100"])
+    assert not g["passed"] and g["unresolved"] == 0 and any("fallback rate" in r for r in g["reasons"])
+    # sampled stages: only unresolved items count
+    g = stage_gate(cfg, "s7_rewrite", out, ids + ["d100"])
+    assert g["passed"] and not g["greedy"]
+
+
+def test_amendment_1_length_feasibility():
+    from awmsm.pilot import apply_amendments, word_stats
+    am = {"id": 1, "type": "length_feasibility", "min_median_words": 450,
+          "max_share_under_words": {"words": 400, "share": 0.25}}
+    def m(words_a, words_b):
+        return {"candidates": {"A": {"s7_words_all_parsed": word_stats(words_a)},
+                               "B": {"s7_words_all_parsed": word_stats(words_b)}}}
+    ok = [800] * 100
+    short_median = [440] * 100                          # median 440 < 450 -> infeasible
+    many_short = [380] * 26 + [900] * 74                # 26% under 400 -> infeasible (median fine)
+    edge = [399] * 25 + [900] * 75                      # exactly 25% under 400 -> allowed
+    d = apply_amendments({"winner": "B", "reason": "quality"}, [am], m(ok, short_median))
+    assert d["winner"] == "A" and d["rule_winner"] == "B" and d["amendment_applied"] == 1
+    d = apply_amendments({"winner": "B", "reason": "quality"}, [am], m(ok, many_short))
+    assert d["winner"] == "A"
+    d = apply_amendments({"winner": "B", "reason": "quality"}, [am], m(ok, edge))
+    assert d["winner"] == "B" and "amendment_applied" not in d
+    d = apply_amendments({"winner": "A", "reason": "quality"}, [am], m(short_median, many_short))
+    assert d["winner"] is None and d["rule_winner"] == "A"
+    d = apply_amendments({"winner": None, "reason": "audit not complete"}, [am], m(ok, short_median))
+    assert d["winner"] is None and d["amendment_checks"]["amendment_1"]["B"]["feasible"] is False
+
+
+def test_s7_length_precheck_400_1500(cfg):
+    from awmsm.gen.midtrain_pipeline import DocChecks
+    c7 = DocChecks(Config(cfg.base, cfg.gen, root=REPO), "s7_rewrite")
+    c5 = DocChecks(Config(cfg.base, cfg.gen, root=REPO), "s5_draft")
+    for n, ok7 in ((399, False), (400, True), (1500, True), (1501, False)):
+        r = c7.check("<content>" + _words(n) + ".</content>", "stop")
+        assert (r.bad is None) == ok7 and r.words == n, n
+        if not ok7:
+            assert r.bad.reason == "length_out_of_range"
+    assert c5.check("<content>" + _words(300) + ".</content>", "stop").bad is None     # S5 keeps 225-2,000
+
+
+def test_audit_export_needs_registration(pilot_cfg):
+    pilot = Pilot(pilot_cfg)
+    with pytest.raises(PilotError, match="Register the decision rule"):
+        pilot.phase_audit_export()

@@ -22,13 +22,14 @@ from pydantic import Field, create_model
 from .. import prompts
 from ..config import Config
 from ..io import Rejected, append_jsonl, read_jsonl
-from ..llm import LLMClient, response_format_for
-from ..textchecks import first_failure, language_mixing, length, truncated
+from ..llm import LLMClient, ThinkingLeakError, leading_plan, response_format_for, scratchpad_closed_with_think
+from ..textchecks import degenerate_repetition, first_failure, language_mixing, length, truncated
 from .schemas import S8_CRITERIA, Critique, DocTypes, Domains, FilterVerdict, Idea, Subdomains
 
 log = logging.getLogger(__name__)
 
 CONTENT_RE = re.compile(r"<content>(.*?)</content>", re.S | re.I)
+FORBIDDEN_IN_CONTENT = re.compile(r"</?think>|<\|channel>|<channel\|>|scratchpad", re.I)
 
 
 # ----------------------------------------------------------------------------- context
@@ -57,9 +58,14 @@ class GenContext:
 
     @property
     def requirements_block(self) -> str:
-        lo, hi = self.cfg.gen["documents"]["target_tokens"]
         return prompts.fill(prompts.load_text("E05_requirements_block", str(self.cfg.root / "prompts")),
-                            {**self.identity, "min_tokens": lo, "max_tokens": hi})
+                            {**self.identity, **self.length_words})
+
+    @property
+    def length_words(self) -> dict[str, str]:
+        """Doc v1.7.4: the length target is stated to the model in words (E.5 / E.7)."""
+        lo, hi = self.cfg.gen["documents"]["target_words"]
+        return {"min_words": f"{int(lo):,}", "max_words": f"{int(hi):,}"}
 
     @property
     def reason_type(self) -> str:
@@ -101,6 +107,11 @@ def excerpt_coverage(spec_text: str, excerpts: list[str]) -> dict[str, Any]:
     }
 
 
+def template_sha(tpl: prompts.Template, requirements_block: str = "") -> str:
+    """Short hash of a template's text (+ requirements block): drafts from different wordings never mix."""
+    return hashlib.sha256((tpl.prefix + "\x00" + tpl.suffix + "\x00" + requirements_block).encode()).hexdigest()[:12]
+
+
 def bullet(items: list[str]) -> str:
     return "\n" + "\n".join(f"- {a}" for a in items)
 
@@ -111,41 +122,100 @@ def idea_json(idea: dict[str, Any]) -> str:
     return json.dumps({k: idea[k] for k in keys}, ensure_ascii=False)
 
 
-def extract_content(text: str, finish_reason: str | None) -> tuple[str | None, str | None]:
-    """Document text inside <content>…</content>, or (None, rejection reason)."""
+OPEN_RE = re.compile(r"<content>", re.I)
+CLOSE_RE = re.compile(r"</content>", re.I)
+# sentence-final punctuation, optionally followed by closing quotes/brackets (doc v1.7.2 §6.3 S5)
+SENTENCE_END_RE = re.compile(r"[.!?…][\"'”’»)\]]*\Z")
+
+
+@dataclass
+class Parsed:
+    doc: str | None
+    reason: str | None = None            # rejection reason when doc is None
+    tolerances: list[str] = field(default_factory=list)
+
+
+def parse_content(text: str, finish_reason: str | None) -> Parsed:
+    """Doc v1.7.2 §6.3 S5 output parsing (S5 drafts and S7 rewrites, every generator).
+
+    Accepted: one complete ``<content>…</content>`` block, or ONE unclosed ``<content>`` when the model
+    stopped on its own and the text ends on sentence-final punctuation (optionally followed by a closing
+    quote or bracket) -> tolerance ``unclosed_content``. Rejected: two or more ``<content>`` tags, output
+    cut off at the token limit, anything else without a usable block."""
+    n_open = len(OPEN_RE.findall(text))
+    if n_open >= 2:
+        return Parsed(None, "multiple_content_tags")
     m = CONTENT_RE.search(text)
     if m and m.group(1).strip():
-        return m.group(1).strip(), None
+        return Parsed(m.group(1).strip())
     if finish_reason == "length":
-        return None, "truncated_max_tokens"
-    return None, "missing_content_tags"
+        return Parsed(None, "truncated_max_tokens")
+    if n_open == 1 and not CLOSE_RE.search(text) and finish_reason == "stop":
+        doc = text[OPEN_RE.search(text).end():].strip()
+        if not doc:
+            return Parsed(None, "missing_content_tags")
+        if not SENTENCE_END_RE.search(doc):
+            return Parsed(None, "unclosed_content_unterminated")
+        return Parsed(doc, tolerances=["unclosed_content"])
+    return Parsed(None, "missing_content_tags")
+
+
+def extract_content(text: str, finish_reason: str | None) -> tuple[str | None, str | None]:
+    """Backward-compatible (doc, rejection reason) view of ``parse_content``."""
+    p = parse_content(text, finish_reason)
+    return p.doc, p.reason
+
+
+@dataclass
+class DocResult:
+    doc: str | None
+    bad: Rejected | None
+    tolerances: list[str]
+    words: int | None = None      # words of the parsed document (None if nothing could be parsed)
 
 
 class DocChecks:
-    """§6.1.1 A.4 cheap checks for S5/S7 documents, in order: truncation, missing tags, language
-    mixing, length, E.5 regex rules. Returns the first failure."""
+    """§6.1.1 A.4 cheap checks for S5/S7 documents, in order: parsing (doc v1.7.2), truncation, tags
+    inside the document, language mixing, length, repetition loops, E.5 regex rules. First failure wins."""
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, stage: str = "s5_draft"):
         lm = cfg.precheck_cfg("language_mixing")
         self.max_non_latin = float(lm.get("max_non_latin_share", 0.01))
         pc = cfg.gen.get("prechecks") or {}
         self.min_words, self.max_words = pc.get("document_words", [None, None])
+        if stage == "s7_rewrite" and pc.get("s7_words"):   # doc v1.7.4 production length pre-check
+            self.min_words, self.max_words = pc["s7_words"]
+        rp = pc.get("degenerate_repetition") or {}
+        self.rep = {"max_line_repeats": int(rp.get("max_line_repeats", 5)),
+                    "max_ngram_repeats": int(rp.get("max_ngram_repeats", 3)), "ngram": int(rp.get("ngram", 10))}
         rx_file = pc.get("regex_file")
         rules = yaml.safe_load((cfg.root / rx_file).read_text()) if rx_file else []
         self.regexes = [(r["reason"], re.compile(r["pattern"])) for r in rules or []]
 
-    def __call__(self, raw: str, finish_reason: str | None) -> tuple[str | None, Rejected | None]:
-        doc, why = extract_content(raw, finish_reason)
-        if doc is None:
-            return None, Rejected(why or "missing_content_tags")
+    def check(self, raw: str, finish_reason: str | None) -> DocResult:
+        p = parse_content(raw, finish_reason)
+        if p.doc is None:
+            return DocResult(None, Rejected(p.reason or "missing_content_tags", {"tolerances": p.tolerances}), p.tolerances)
+        doc = p.doc
+        words = len(doc.split())
         bad = first_failure(
             truncated(finish_reason),
+            # no thinking tag or scratchpad may survive inside the document (doc v1.7.1/v1.7.2 S5)
+            Rejected("tag_in_content", {"match": m.group(0)}) if (m := FORBIDDEN_IN_CONTENT.search(doc)) else None,
             language_mixing(doc, self.max_non_latin),
             length(doc, self.min_words, self.max_words),
+            degenerate_repetition(doc, **self.rep),
             *(Rejected(reason, {"match": m.group(0)[:80]}) if (m := rx.search(doc)) else None
               for reason, rx in self.regexes),
         )
-        return (None, bad) if bad else (doc, None)
+        if bad:
+            bad.detail = {**(bad.detail or {}), "tolerances": p.tolerances}
+            return DocResult(None, bad, p.tolerances, words)
+        return DocResult(doc, None, p.tolerances, words)
+
+    def __call__(self, raw: str, finish_reason: str | None) -> tuple[str | None, Rejected | None]:
+        r = self.check(raw, finish_reason)
+        return r.doc, r.bad
 
 
 # ----------------------------------------------------------------------------- S1–S4
@@ -235,20 +305,45 @@ def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k
 def s5_fn(ctx: GenContext, client: LLMClient, checks: DocChecks):
     tpl = ctx.template("E05_draft")
     req = ctx.requirements_block
+    tpl_sha = template_sha(tpl, req)
 
     async def fn(idea: dict[str, Any]) -> dict[str, Any] | Rejected:
         r = tpl.render(**ctx.identity, requirements_block=req, spec_excerpt=idea["spec_excerpt"],
                        doc_type=idea["doc_type"], assertions=bullet(idea["assertions"]),
                        what=idea["what"], how=idea["how"], why=idea["why"])
         ctx.capture("s5_draft", idea["id"], r, idea["domain_id"])
-        res = await client.complete_full(r.text, stage="s5_draft")
-        doc, bad = checks(res.texts[0], res.finish_reasons[0])
-        if bad:
-            return bad
+        try:
+            res = await client.complete_full(r.text, stage="s5_draft")
+        except ThinkingLeakError:   # doc v1.7.1 S5: a real thinking leak is a rejection (same seed would repeat it)
+            return Rejected("thinking_leak", {"template_sha": tpl_sha, "tolerances": []})
+        slip = scratchpad_closed_with_think(res.texts[0])   # deviation 8: tolerated, reported per candidate
+        plan = leading_plan(res.texts[0])
+        diag = {"scratchpad_closed_with_think": slip, "template_sha": tpl_sha,
+                "plan_words": None if plan is None else len(plan.split()),   # None: no closed leading plan
+                "n_tokens": res.usage.get("completion_tokens"), "finish_reason": res.finish_reasons[0]}
+        cr = checks.check(res.texts[0], res.finish_reasons[0])
+        diag["tolerances"] = (["scratchpad_closed_with_think"] if slip else []) + cr.tolerances
+        diag["doc_words"] = cr.words
+        if cr.bad:
+            cr.bad.detail = {**(cr.bad.detail or {}), **diag}
+            return cr.bad
+        doc = cr.doc
         return {"id": f"doc_{idea['id']}_draft", "idea_id": idea["id"], "stage": "draft", "text": doc,
                 "gen_model": client.model.hf_id, "prompt_sha": res.key, "n_tokens": res.usage.get("completion_tokens"),
-                "words": len(doc.split())}
+                "words": len(doc.split()), **diag}
     return fn
+
+
+def greedy_json(res, schema):
+    """Validate a greedy JSON completion and return (object, diagnostics). Diagnostics persist the §6.1
+    fallback per record so the stage gate (doc v1.7.3) can be computed from the output files."""
+    fb = res.params.get("t0_fallback") if res.t0_fallback else None
+    diag = {"t0_fallback": bool(res.t0_fallback),
+            "t0_fallback_reason": fb["reason"] if fb else None,
+            "greedy_tokens": fb["greedy_completion_tokens"] if fb else res.usage.get("completion_tokens"),
+            "final_tokens": fb["fallback_completion_tokens"] if fb else res.usage.get("completion_tokens"),
+            "finish_reason": res.finish_reasons[0]}
+    return schema.model_validate_json(res.texts[0]), diag
 
 
 def s6_fn(ctx: GenContext, client: LLMClient, ideas: dict[str, dict[str, Any]]):
@@ -260,9 +355,11 @@ def s6_fn(ctx: GenContext, client: LLMClient, ideas: dict[str, dict[str, Any]]):
         r = tpl.render(spec_excerpt=idea["spec_excerpt"], anti_pattern_list=apl,
                        idea_json=idea_json(idea), draft=draft["text"])
         ctx.capture("s6_critique", idea["id"], r, idea["domain_id"], response_format_for(Critique))
-        crit = (await client.complete_json(r.text, stage="s6_critique", schema=Critique))[0]
+        res = await client.complete_full(r.text, stage="s6_critique", json_schema=Critique)
+        crit, diag = greedy_json(res, Critique)
         return {"id": f"crit_{idea['id']}", "doc_id": draft["id"], "idea_id": idea["id"],
-                "issues": [i.model_dump() for i in crit.issues], "overall": crit.overall}
+                "issues": [i.model_dump() for i in crit.issues], "overall": crit.overall,
+                "n_issues": len(crit.issues), **diag}
     return fn
 
 
@@ -270,22 +367,29 @@ def s7_fn(ctx: GenContext, client: LLMClient, ideas: dict[str, dict[str, Any]],
           drafts: dict[str, dict[str, Any]], checks: DocChecks):
     tpl = ctx.template("E07_rewrite")
     req = ctx.requirements_block
+    tpl7_sha = template_sha(tpl, req)
 
     async def fn(crit: dict[str, Any]) -> dict[str, Any] | Rejected:
         idea = ideas[crit["idea_id"]]
         draft = drafts[crit["idea_id"]]
-        r = tpl.render(**ctx.identity, requirements_block=req, spec_excerpt=idea["spec_excerpt"],
+        r = tpl.render(**ctx.identity, **ctx.length_words, requirements_block=req, spec_excerpt=idea["spec_excerpt"],
                        doc_type=idea["doc_type"], idea_json=idea_json(idea), draft=draft["text"],
                        critique_json=json.dumps({"issues": crit["issues"], "overall": crit["overall"]},
                                                 ensure_ascii=False))
         ctx.capture("s7_rewrite", idea["id"], r, idea["domain_id"])
-        res = await client.complete_full(r.text, stage="s7_rewrite")
-        doc, bad = checks(res.texts[0], res.finish_reasons[0])
-        if bad:
-            return bad
+        try:
+            res = await client.complete_full(r.text, stage="s7_rewrite")
+        except ThinkingLeakError:
+            return Rejected("thinking_leak", {"tolerances": []})
+        cr = checks.check(res.texts[0], res.finish_reasons[0])
+        diag = {"tolerances": cr.tolerances, "n_tokens": res.usage.get("completion_tokens"),
+                "finish_reason": res.finish_reasons[0], "doc_words": cr.words, "template_sha": tpl7_sha}
+        if cr.bad:
+            cr.bad.detail = {**(cr.bad.detail or {}), **diag}
+            return cr.bad
+        doc = cr.doc
         return {"id": f"doc_{idea['id']}_rewrite", "idea_id": idea["id"], "stage": "rewrite", "text": doc,
-                "gen_model": client.model.hf_id, "prompt_sha": res.key, "n_tokens": res.usage.get("completion_tokens"),
-                "words": len(doc.split())}
+                "gen_model": client.model.hf_id, "prompt_sha": res.key, "words": len(doc.split()), **diag}
     return fn
 
 
@@ -300,11 +404,12 @@ def s8_fn(ctx: GenContext, judge: LLMClient, ideas: dict[str, dict[str, Any]], w
                        spec_excerpt=idea["spec_excerpt"], text=doc["text"])
         if capture:
             ctx.capture("s8_filter", idea["id"], r, idea["domain_id"], response_format_for(FilterVerdict))
-        v = (await judge.complete_json(r.text, stage="s8_filter", schema=FilterVerdict))[0]
+        res = await judge.complete_full(r.text, stage="s8_filter", json_schema=FilterVerdict)
+        v, diag = greedy_json(res, FilterVerdict)
         crit = {k: getattr(v.criteria, k).verdict == "PASS" for k in S8_CRITERIA}
         verdict = "INCLUDE" if all(crit.values()) else "EXCLUDE"   # §6.3: INCLUDE only if all six pass
         return {"id": f"{doc['id']}__{judge_name}", "doc_id": doc["id"], "idea_id": idea["id"],
                 "writer": writer, "judge": judge_name, "judge_model": judge.model.hf_id,
                 "criteria": crit, "rationale": {k: getattr(v.criteria, k).reason for k in S8_CRITERIA},
-                "verdict": verdict, "model_verdict": v.verdict, "consistent": v.verdict == verdict}
+                "verdict": verdict, "model_verdict": v.verdict, "consistent": v.verdict == verdict, **diag}
     return fn

@@ -52,8 +52,8 @@ stages:
   s2_subdomains:        {temperature: 0.7, max_tokens: 4000}
   s3_doctypes:          {temperature: 0.7, max_tokens: 600}
   s4_ideas:             {temperature: 0.9, max_tokens: 2000}
-  s5_draft:             {temperature: 0.7, max_tokens: 2800}   # 1,800 x 1.3 + scratchpad
-  s6_critique:          {temperature: 0.0, max_tokens: 1500}
+  s5_draft:             {temperature: 0.7, max_tokens: 3200}   # doc v1.7.1 §6.3 S5 [default]; was 2,800 (truncation 4.1%)
+  s6_critique:          {temperature: 0.0, max_tokens: 3000}   # doc v1.7.3 §6.3 S6; was 1,500 (15.8% fallback)
   s7_rewrite:           {temperature: 0.7, max_tokens: 2400}
   s8_filter:            {temperature: 0.0, max_tokens: 800}
   s10_scan:             {temperature: 0.0, max_tokens: 1500}
@@ -108,11 +108,18 @@ prechecks:
     max_non_latin_share: 0.01   # [default] share of letters not in Latin script (e.g. CJK)
     apply_to: [s4_ideas, s5_draft, s7_rewrite, aft_response, mde_candidates]
   document_words: [225, 2000]   # S5/S7 sanity bounds: ~0.5x of 600 tokens .. ~1.5x of 1,800 tokens, in words
+  s7_words: [400, 1500]         # doc v1.7.4 production length pre-check: S7 rewrites outside -> length_out_of_range
   regex_file: lists/anti_pattern_regexes.yaml   # E.5 rules checkable by regex (placeholders, URLs)
+  degenerate_repetition:        # doc v1.7.2 §6.1.1 A.4 [defaults]; reject repetition loops
+    max_line_repeats: 5         # any non-empty line occurring more than 5 times
+    ngram: 10
+    max_ngram_repeats: 3        # any 10-word sequence occurring more than 3 times
+    apply_to: [s5_draft, s7_rewrite, aft_response]
 
 # Documents (§6.3 S5)
 documents:
-  target_tokens: [600, 1800]    # [default] {min_tokens}-{max_tokens} in E.5
+  target_tokens: [600, 1800]    # [default] target in tokens (§6.3 S5); NOT shown to the model
+  target_words: [450, 1350]     # doc v1.7.4: {min_words}-{max_words} in E.5/E.7 (~0.75 words per token)
   reason_type:                  # E.8 {reason_type} per spec
     aw_main: "intrinsic (animals' own experiences)"
     aw_guard: "intrinsic (animals' own experiences)"
@@ -126,7 +133,7 @@ s4:
   k: 6                          # [default] ideas per (subdomain, doc type) call
   # S4 ideas are rejected if they contain the generator's own reasoning ("Wait, the prompt says ...").
   # A call left with fewer clean ideas than needed is re-requested with a new seed (max retries below).
-  meta_commentary_regex: '(?i)\bwait[,.!]|\bthe prompt\b|\bprompt (says|specifies|asks)\b|\bthe (instructions|required attributes|attributes) (say|says|specify|specifies)\b|\bI will (adjust|ensure|make sure|now)\b|\blet me\b|\bcost_of_care\s*=|\bwelfare_raised\s*=|\bis_story\s*='
+  meta_commentary_regex: '(?i)\bwait[,.!]|\bthe prompt\b|\bprompt (says|specifies|asks)\b|\bthe (instructions|required attributes|attributes) (say|says|specify|specifies)\b|\bI will (adjust|ensure|make sure|now)\b|\blet me\b|\bcost_of_care\s*=|\bwelfare_raised\s*=|\bis_story\s*=|\b(the )?[''\"]?(costly|costless|co-beneficial|appropriately_not_raised|raised)[''\"]? (attribute|tag|requirement|constraint|condition|label)\b|\b(attribute|tag|requirement|constraint) (is|was|are) (met|satisfied|shown|fulfilled|reflected)\b'
   max_resample: 2
   quotas:
     story_share: 0.20           # S3: stories 15-25% [default 20%]; paired with perspective fictional_narrator
@@ -177,6 +184,16 @@ pilot:
       nominal_pp: 0.12                # 12 pp, so the operational count (>= 3 of 25) is what is applied
     candidate_c_trigger: {human_fail_rate_above: 0.15}   # both A and B above G1 -> run C, no winner yet
     throughput: feasibility_check_only
+    amendments:                       # registered separately (timestamp each); the rule above is unchanged
+      - id: 1
+        date: "2026-10-05"
+        doc: "AW_MSM_Methodology v1.7.4, Appendix I.1 step 5, Amendment 1"
+        type: length_feasibility      # a feasibility condition, like throughput; not a quality criterion
+        stage: s7_rewrite
+        min_median_words: 450         # median S7 rewrite under 450 words -> cannot be the generator
+        max_share_under_words: {words: 400, share: 0.25}   # > 25% of rewrites under 400 words -> cannot be the generator
+        population: all S7 responses with a parsed document (kept + rejected, incl. length_out_of_range)
+        reason: "First run gave the length in tokens; Gemma's rewrites came out at half Qwen's length (median 415 vs 828 words; 134/200 under ~450 words), confounding quality with length. S5-S7 regenerated for both with the target in words; earlier S8 judging discarded."
 
 # LLM client behaviour (§13.5)
 client:

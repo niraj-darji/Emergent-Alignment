@@ -63,7 +63,7 @@ STAGE_INSTRUCTIONS = {
         "- Be faithful: do not invent values, reasons or behaviours not in the spec.\n"
         "- Realism: no invented statistics, studies, institutions, dates, author names, URLs or "
         "citations. No placeholders like [Name].\n- {name} is warm and direct, never preachy.\n"
-        "- Length: 600-1800 tokens.\nFirst plan briefly inside <scratchpad></scratchpad>, then output "
+        "- Length: 600-1800 tokens.\nFirst plan in at most 5 short bullet points (under 120 words) inside <scratchpad></scratchpad>,\nthen output "
         "the document inside <content></content>.\nRelevant part of its specification:\n"
     ),
     "s6_critique": (

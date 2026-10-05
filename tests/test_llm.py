@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -11,8 +12,15 @@ from awmsm.llm import JSONValidationError, LLMClient, LLMError, ThinkingLeakErro
 from .conftest import FakeVLLM, chat_response
 
 
+def _words(n: int) -> str:
+    """n distinct words (repeated "word" would now trip the repetition check)."""
+    return " ".join(f"w{i}" for i in range(n))
+
+
+
 class Answer(BaseModel):
     answer: str
+
 
 
 def make(cfg: Config, fake: FakeVLLM, role: str = "generator") -> LLMClient:
@@ -29,7 +37,7 @@ async def test_sampling_sent_explicitly(cfg, fake):
     assert (b["temperature"], b["top_p"], b["top_k"], b["min_p"]) == (0.7, 0.8, 20, 0.0)
     # penalties explicitly off (D17)
     assert (b["presence_penalty"], b["frequency_penalty"], b["repetition_penalty"]) == (0.0, 0.0, 1.0)
-    assert b["max_tokens"] == 2800 and isinstance(b["seed"], int)
+    assert b["max_tokens"] == 3200 and isinstance(b["seed"], int)
     assert b["chat_template_kwargs"] == {"enable_thinking": False}
     assert b["messages"] == [{"role": "user", "content": "hello"}]
 
@@ -250,3 +258,86 @@ async def test_request_log_contents(cfg, fake):
     req = json.loads(row[5])
     assert req["prompt"] == "log me" and req["system"] == "sys" and req["top_p"] == 0.8
     assert req["extra_body"]["top_k"] == 20 and req["seed"] == row[4]
+
+
+
+def test_thinking_leak_tolerates_scratchpad_closed_with_think():
+    from awmsm.llm import scratchpad_closed_with_think, thinking_leak
+    slip = "<scratchpad>\nplan...\nLet's write.\n</think>\n\n<content>\nDoc.\n</content>"
+    assert not thinking_leak(slip) and scratchpad_closed_with_think(slip)
+    ok = "<scratchpad>plan</scratchpad><content>Doc.</content>"
+    assert not thinking_leak(ok) and not scratchpad_closed_with_think(ok)
+    assert not thinking_leak("<content>Doc.</content>")
+    # markers inside <content> are left to DocChecks (rejection, not an error)
+    assert not thinking_leak("<scratchpad>plan</think><content>Doc.</think></content>")
+    # still leaks
+    assert thinking_leak("<think>reasoning</think><content>Doc.</content>")
+    assert thinking_leak("<scratchpad><think>plan</think><content>Doc.</content>")      # marker inside the plan
+    assert thinking_leak("<scratchpad>plan</think> more </think><content>Doc.</content>")  # a second </think>
+    assert thinking_leak("Some text </think> <content>Doc.</content>")                 # no leading scratchpad
+    assert thinking_leak("<scratchpad>plan</scratchpad><content>Doc.</content></think>")
+
+
+def test_doc_checks_reject_tags_inside_content(cfg):
+    from awmsm.config import Config
+    from awmsm.gen.midtrain_pipeline import DocChecks
+    checks = DocChecks(Config(cfg.base, cfg.gen, root=Path(__file__).resolve().parents[1]))
+    body = _words(400)
+    doc, bad = checks(f"<scratchpad>p</think><content>{body}</content>", "stop")
+    assert bad is None and doc == body
+    for inner in ("</think>", "<think>", "<scratchpad>", "my Scratchpad notes", "<|channel>"):
+        doc, bad = checks(f"<scratchpad>p</scratchpad><content>{body} {inner} {body}</content>", "stop")
+        assert doc is None and bad.reason == "tag_in_content", inner
+    doc, bad = checks(f"<scratchpad>p</think><content>{body}", "stop")      # unclosed, no sentence end
+    assert doc is None and bad.reason == "unclosed_content_unterminated"
+
+
+def test_v172_unclosed_content_rule(cfg):
+    from awmsm.config import Config
+    from awmsm.gen.midtrain_pipeline import DocChecks, parse_content
+    checks = DocChecks(Config(cfg.base, cfg.gen, root=Path(__file__).resolve().parents[1]))
+    body = _words(400)
+    # accepted unclosed: stopped on its own, one <content>, sentence-final punctuation (+ closing quote/bracket)
+    for end in (".", "!", "?", '."', ".”", ".)", "?')", "…"):
+        r = checks.check(f"<scratchpad>p</scratchpad>\n<content>\n{body}{end}\n\n", "stop")
+        assert r.bad is None and r.tolerances == ["unclosed_content"] and r.doc.endswith(end), end
+    # rejected
+    assert checks.check(f"<content>{body}.", "length").bad.reason == "truncated_max_tokens"
+    assert checks.check(f"<content>{body}", "stop").bad.reason == "unclosed_content_unterminated"
+    assert checks.check(f"<content>{body}:", "stop").bad.reason == "unclosed_content_unterminated"
+    assert checks.check(f"<content>a.<content>{body}.", "stop").bad.reason == "multiple_content_tags"
+    assert checks.check(f"<content>a.</content><content>{body}.</content>", "stop").bad.reason == "multiple_content_tags"
+    assert checks.check(f"<content>{body}. </scratchpad>", "stop").bad.reason == "unclosed_content_unterminated"
+    assert checks.check(f"<content>{body} the scratchpad says.", "stop").bad.reason == "tag_in_content"
+    assert checks.check(f"{body}.", "stop").bad.reason == "missing_content_tags"
+    # closed blocks are unchanged and carry no tolerance
+    r = checks.check(f"<content>{body}</content>", "stop")
+    assert r.bad is None and r.tolerances == []
+    assert parse_content("<content> a </content>", "stop").doc == "a"
+
+
+def test_degenerate_repetition():
+    from awmsm.textchecks import degenerate_repetition
+    body = _words(300)
+    assert degenerate_repetition(body) is None
+    reply = "**Reply by: Aster (Your Lab Assistant)**"
+    turns = lambda k: "".join(f"\n{reply}\nanswer {i} " + " ".join(f"t{i}_{j}" for j in range(8)) for i in range(k))  # noqa: E731
+    assert degenerate_repetition(body + turns(5)) is None                              # header x5: allowed
+    r = degenerate_repetition(body + turns(6))                                         # header x6: loop
+    assert r.reason == "degenerate_repetition" and r.detail["kind"] == "line" and r.detail["count"] == 6
+    loop = " Let us make it kind, and let us make it specific for everyone here today."  # 15 words
+    assert degenerate_repetition(body + loop * 3) is None                              # each 10-gram x3: allowed
+    r = degenerate_repetition(body + loop * 4)
+    assert r.detail["kind"] == "10-gram" and r.detail["count"] == 4
+    # case and edge punctuation are ignored for word sequences
+    assert degenerate_repetition(body + " " + " ".join(["Alpha beta, gamma delta epsilon zeta eta theta iota kappa."] * 4)) is not None
+
+
+def test_repetition_exemptions_short_lines_and_code_fences():
+    from awmsm.textchecks import degenerate_repetition
+    body = _words(300)
+    pretty_json = "\n".join(x for i in range(8) for x in ("{", f'  "k{i}": "value {i} {_words(3)}"', "}", "---"))  # { } --- x8: ignored
+    assert degenerate_repetition(body + "\n" + pretty_json) is None
+    code = "\n```python\n" + "\n".join(["print('the same line of code here')"] * 9) + "\n```\n"
+    assert degenerate_repetition(body + code + "end") is None                  # fenced block skipped
+    assert degenerate_repetition(body + code.replace("```python", "").replace("```", "")) is not None

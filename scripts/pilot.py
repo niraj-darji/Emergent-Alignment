@@ -31,6 +31,73 @@ from awmsm.config import Config  # noqa: E402
 from awmsm.pilot import Pilot, PilotError  # noqa: E402
 
 
+def _print_s5(path: Path) -> None:
+    if not path.exists():
+        return
+    s = json.loads(path.read_text())
+    pw = s.get("plan_words") or {}
+    print(f"\nS5: {s['responses']} responses for {s['n_ideas']} ideas (kept {s['kept']}, rejected {s['rejected']}, "
+          f"unresolved {s['unresolved']})")
+    print(f"  truncation {s['truncated']}/{s['responses']} = {s['truncation_rate']:.1%}   "
+          f"</think> slip {s['think_slip']}/{s['responses']} = {s['think_slip_rate']:.1%}   "
+          f"no closed plan: {s['no_closed_plan']}")
+    print(f"  plan words: {pw}  over 120: {s['plan_over_120_words']}  bins: {s['plan_word_bins']}")
+    print(f"  output tokens: {s.get('output_tokens')}")
+    print(f"  rejections: {s['rejections']}   E.5 template: {s['template_shas']}")
+    _print_common(s)
+
+
+def _print_words(label: str, w: dict | None) -> None:
+    if w:
+        print(f"  {label}: n={w['n']} median {w['median']:.0f}  p10 {w['p10']}  p90 {w['p90']}  min {w['min']}  max {w['max']}  "
+              f"under 400: {w['under_400']} ({w['share_under_400']:.1%})  under 450: {w['under_450']}  "
+              f"over 1,500: {w['over_1500']} ({w['share_over_1500']:.1%})")
+
+
+def _print_common(s: dict) -> None:
+    ss = s.get("story_share") or {}
+    _print_words("words (all parsed docs)", s.get("words_all_parsed"))
+    _print_words("words (kept)          ", s.get("words_kept"))
+    print(f"  keep rate {s['kept']}/{s['responses']} = {s['keep_rate']:.1%}   "
+          f"tolerated (kept): {s['tolerances_kept'] or 'none'}   (all responses: {s['tolerances_all_responses'] or 'none'})")
+    print(f"  repetition loops {s['degenerate_repetition']} = {s['degenerate_repetition_rate']:.1%}   "
+          f"examples: {[(e['kind'], e['count'], (e['match'] or '')[:50]) for e in s['repetition_examples'][:3]]}")
+    if ss:
+        print(f"  story share of kept docs {ss['kept_stories']}/{ss['kept']} = {ss['share']:.1%}  quota {ss['quota']} "
+              f"-> {'ok' if ss['within_quota'] else 'OUT OF QUOTA'}  (frozen ideas: {ss['frozen_ideas_share']:.1%})")
+
+
+def _print_s6(path: Path) -> None:
+    if not path.exists():
+        return
+    s = json.loads(path.read_text())
+    print(f"\nS6: {s['critiques']} critiques   T=0 fallbacks {s['t0_fallbacks']} {s['fallback_reasons'] or ''}   "
+          f"still truncated after fallback: {s['final_truncated']}")
+    print(f"  greedy output tokens: {s['greedy_tokens']}")
+    print(f"  final output tokens:  {s['final_tokens']}")
+    print(f"  issues per critique:  {s['issues_per_critique']}   overall: {s['overall']}")
+
+
+def _print_gates(path: Path) -> None:
+    if not path.exists():
+        return
+    for k, g in json.loads(path.read_text()).items():
+        fb = (f", T=0 fallback {g['t0_fallbacks']}/{g['t0_calls']} = {g['t0_fallback_rate']:.1%}"
+              if g.get("greedy") else "")
+        print(f"  gate {k}: {'PASS' if g['passed'] else 'HALT ' + '; '.join(g['reasons'])} "
+              f"(inputs {g['inputs']}, unresolved {g['unresolved']}{fb})")
+
+
+def _print_s7(path: Path) -> None:
+    if not path.exists():
+        return
+    s = json.loads(path.read_text())
+    print(f"\nS7: {s['responses']} responses for {s['inputs']} critiques (kept {s['kept']}, rejected {s['rejected']}, "
+          f"unresolved {s['unresolved']})")
+    print(f"  truncation {s['truncated']}/{s['responses']} = {s['truncation_rate']:.1%}   rejections: {s['rejections']}")
+    _print_common(s)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="phase", required=True)
@@ -64,8 +131,17 @@ def main() -> int:
             print(f"  cost_of_care of not-raised ideas: {s['not_raised_cost_of_care']}")
             print("Next: python scripts/pilot.py write --cand A")
         elif a.phase == "write":
-            man = asyncio.run(pilot.phase_write(a.cand))
+            try:
+                man = asyncio.run(pilot.phase_write(a.cand))
+            finally:
+                cd = pilot.cand_dir(a.cand)
+                _print_s5(cd / "s5_summary.json")
+                _print_s6(cd / "s6_summary.json")
+                _print_s7(cd / "s7_summary.json")
+                print("\nStage gates (doc §6.1):")
+                _print_gates(cd / "gates.json")
             st = man["manifest"]["stats"]
+            print("Coverage:", json.dumps(man["coverage"]))
             print(f"\nCandidate {a.cand} done. Stage seconds: {man['stage_seconds_this_run']}")
             print("Fallbacks:", json.dumps(man["manifest"]["t0_fallback_report"]))
             print("Requests per stage:", {k: v["requests"] for k, v in st.items()})
@@ -82,11 +158,22 @@ def main() -> int:
             for c, v in m["candidates"].items():
                 print(f"  {c}: docs {v['rewrites_kept']}, near-dup {v['near_duplicate_rate']:.1%}, "
                       f"lang-mix rej {v['language_mixing_rejection_rate']:.1%}, rejections {v['rejections']}")
+                sl = v["s5_think_slip"]
+                for st, b in v["by_stage"].items():
+                    print(f"     {st}: keep {b['keep_rate']:.1%}, tolerated {b['tolerances_kept'] or '-'}, "
+                          f"repetition {b['degenerate_repetition_rate']:.1%}, story share "
+                          f"{(b.get('story_share') or {}).get('share', 0):.1%}")
+                print(f"     S5 </think> slip {sl['count']}/{sl['of']}, S5 truncation {v['s5_truncation_rate']:.1%}, "
+                      f"E.5 template {v['s5_template_sha']}")
             print("Wrote data/pilot/metrics.json")
         elif a.phase == "register-rule":
             reg = pilot.phase_register_rule()
             print(f"Decision rule registered at {reg['registered_at']} (sha256 {reg['sha256'][:12]}, "
                   f"git {str(reg['git_commit'])[:10]}):\n{json.dumps(reg['rule'], indent=2)}")
+            for a in reg.get("amendments", []):
+                print(f"Amendment {a['amendment']['id']} registered at {a['registered_at']} (sha256 {a['sha256'][:12]}, "
+                      f"git {str(a['git_commit'])[:10]}{', UNCOMMITTED changes' if a.get('git_dirty') else ''}):\n"
+                      f"{json.dumps(a['amendment'], indent=2)}")
         elif a.phase == "audit-export":
             r = pilot.phase_audit_export()
             print(f"\nAudit: {r['items']} items ({r['ideas']} ideas x candidates).\n  read:  {r['packet']}\n"

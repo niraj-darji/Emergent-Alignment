@@ -37,6 +37,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 import sqlite3
 import threading
 import time
@@ -56,6 +57,41 @@ from .io import sha256_json
 log = logging.getLogger(__name__)
 
 THINKING_MARKERS = ("<think>", "</think>", "<|channel>", "<channel|>")
+# E.5 asks for "<scratchpad>...</scratchpad>" before the document. Qwen sometimes closes that requested
+# scratchpad with "</think>" instead (deviation 8 in the setup log). That single tag slip is tolerated:
+#   * the leading scratchpad may end with "</think>" instead of "</scratchpad>", and must itself contain
+#     no thinking marker;
+#   * the <content> block is left to the document checks (DocChecks rejects any marker or "scratchpad"
+#     inside it, so such drafts are counted as ordinary rejections, not retried as errors);
+#   * a thinking marker anywhere else (e.g. "<think>...</think>" before the content, a second "</think>")
+#     is still a leak.
+# The scratchpad itself is discarded; only the content becomes the document.
+_LEADING_SCRATCHPAD = re.compile(r"\A\s*<scratchpad>(.*?)(</scratchpad>|</think>)", re.S | re.I)
+_CONTENT_BLOCK = re.compile(r"<content>.*?(?:</content>|\Z)", re.S | re.I)   # closed, or unclosed to the end
+
+
+def thinking_leak(text: str) -> bool:
+    """True if ``text`` shows thinking-mode output (see the rule above)."""
+    rest = text
+    m = _LEADING_SCRATCHPAD.match(text)
+    if m:
+        if any(mk in m.group(1) for mk in THINKING_MARKERS):
+            return True
+        rest = text[m.end():]
+    rest = _CONTENT_BLOCK.sub("", rest)
+    return any(mk in rest for mk in THINKING_MARKERS)
+
+
+def leading_plan(text: str) -> str | None:
+    """Text of the leading scratchpad (closed by either tag), or None if there is none."""
+    m = _LEADING_SCRATCHPAD.match(text)
+    return m.group(1) if m else None
+
+
+def scratchpad_closed_with_think(text: str) -> bool:
+    """The tolerated slip: the leading scratchpad was closed with ``</think>``."""
+    m = _LEADING_SCRATCHPAD.match(text)
+    return bool(m and m.group(2).lower() == "</think>")
 _RETRYABLE = (
     openai.APIConnectionError,   # includes APITimeoutError
     openai.RateLimitError,
@@ -138,6 +174,7 @@ class Completion:
     key: str
     seed: int
     params: dict[str, Any]
+    t0_fallback: bool = False      # greedy stage: the §6.1 retry at T=0.3 was used for >= 1 choice
 
 
 @dataclass
@@ -385,7 +422,10 @@ class LLMClient:
         usage = {k: res.usage.get(k, 0) + fb.usage.get(k, 0) for k in ("prompt_tokens", "completion_tokens")}
         return Completion(texts, reasons, usage, res.cached and fb.cached, res.key, res.seed,
                           res.params | {"t0_fallback": {"reason": reason, "choices": sorted(bad),
-                                                        "params": fb.params}})
+                                                        "params": fb.params,
+                                                        "greedy_completion_tokens": res.usage.get("completion_tokens"),
+                                                        "fallback_completion_tokens": fb.usage.get("completion_tokens")}},
+                          t0_fallback=True)
 
     async def _complete_sampled_json(self, prompt: str, system: str | None, sp: StageSampling, n: int,
                                      seed: int | None, schema: type[BaseModel], use_cache: bool) -> Completion:
@@ -493,6 +533,9 @@ class LLMClient:
 
         if use_cache and (hit := self.cache.get(key)) is not None:
             st.cache_hits += 1
+            if any(thinking_leak(t) for t in hit["texts"]):   # same rule for cached replays
+                st.errors += 1
+                raise ThinkingLeakError(f"Stage {sp.stage}: cached response for {self.model.hf_id} contains a reasoning block.")
             return Completion(hit["texts"], hit["finish_reasons"], hit.get("usage") or {}, True, key, seed, params)
 
         t0 = time.monotonic()
@@ -503,7 +546,7 @@ class LLMClient:
         reasons = [c.finish_reason for c in resp.choices]
         for c in resp.choices:  # thinking must be off (Appendix I.1)
             reasoning = getattr(c.message, "reasoning_content", None) or (c.message.model_extra or {}).get("reasoning")
-            if reasoning or any(mk in (c.message.content or "") for mk in THINKING_MARKERS):
+            if reasoning or thinking_leak(c.message.content or ""):
                 st.errors += 1
                 raise ThinkingLeakError(
                     f"Stage {sp.stage}: {self.model.hf_id} produced a reasoning block. Thinking must be "
