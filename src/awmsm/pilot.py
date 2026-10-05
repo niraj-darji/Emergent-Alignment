@@ -967,6 +967,17 @@ def render_report(cfg: Config, m: dict[str, Any], summary: dict[str, Any], audit
         L.append(f"- {c}: " + "; ".join(f"{s}: c={op.get('concurrency')} → {op.get('requests_per_s') or 0:.3f} req/s "
                                          f"(peak {op.get('peak_requests_per_s') or 0:.3f})" for s, op in tp.items()))
     L += ["", "## Blinded human audit (S11 criteria)", ""]
+    feas = next(iter((decision.get("amendment_checks") or {}).values()), {})
+    for c, v in sorted(m["candidates"].items()):
+        n_len = (v.get("rejections") or {}).get("s7_rewrite:length_out_of_range", 0)
+        if n_len:
+            L.append(f"- **{c}'s audited documents are a selected subset:** they passed the S7 length pre-check "
+                     f"(400–1,500 words), which rejected {n_len} of {c}'s rewrites.")
+        if (feas.get(c) or {}).get("feasible") is False:
+            L.append(f"- **{c} cannot be the generator under Amendment 1** "
+                     f"({'; '.join(feas[c].get('reasons') or [])}), so {c}'s labels mainly serve judge validation "
+                     f"(§9.9) and the step-0 candidate-C check, not the choice of generator.")
+    L.append("")
     if not audit:
         L.append("Not exported or not labelled yet.")
     else:

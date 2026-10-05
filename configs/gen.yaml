@@ -77,7 +77,7 @@ stages:
 # ---------------------------------------------------------------------------
 concurrency:
   default: 32
-  per_stage: {s5_draft: null, s6_critique: null, s7_rewrite: null, s8_filter: null}
+  per_stage: {s5_draft: 128, s6_critique: 64, s7_rewrite: 64, s8_filter: 128}
 
 # Throughput benchmark (§6.1.1 E; scripts/bench_throughput.py).
 bench:

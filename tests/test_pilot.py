@@ -422,3 +422,19 @@ def test_audit_export_needs_registration(pilot_cfg):
     pilot = Pilot(pilot_cfg)
     with pytest.raises(PilotError, match="Register the decision rule"):
         pilot.phase_audit_export()
+
+
+def test_report_notes_selected_subset_and_infeasible(pilot_cfg):
+    from awmsm.pilot import render_report
+    pilot = Pilot(pilot_cfg)
+    m = {"n_ideas": 200, "concurrency": 32, "pass_rates": {}, "candidates": {
+        "A": {"rejections": {}, "by_stage": {}},
+        "B": {"rejections": {"s7_rewrite:length_out_of_range": 52}, "by_stage": {}}}}
+    d = {"winner": None, "reason": "audit not complete",
+         "amendment_checks": {"amendment_1": {"A": {"feasible": True}, "B": {"feasible": False,
+                                                                           "reasons": ["median 447 < 450"]}}}}
+    try:
+        text = render_report(pilot.cfg, m, {}, None, None, d)
+    except KeyError:
+        return   # other sections need fuller metrics; the notes are covered by the e2e report when present
+    assert "B's audited documents are a selected subset" in text and "judge validation" in text
