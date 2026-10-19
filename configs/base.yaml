@@ -37,3 +37,6 @@ token_budget:
   midtrain_tokens: 5_000_000
   midtrain_tolerance: 0.02
   aw_demo_assistant_tokens: 1_500_000
+
+# Training base model (§4.1 primary); its tokenizer counts the corpus token budget (S12)
+train_base_model: meta-llama/Llama-3.1-8B

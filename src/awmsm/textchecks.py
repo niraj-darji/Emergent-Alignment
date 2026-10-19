@@ -125,3 +125,19 @@ def banned_keywords(text: str, keywords: Iterable[str], reason: str = "banned_ke
 def first_failure(*results: Rejected | None) -> Rejected | None:
     """Return the first failing check (checks are ordered cheapest/most decisive first)."""
     return next((r for r in results if r is not None), None)
+
+
+_QUOTE_SPANS = re.compile(
+    r'"([^"\n]+)"'                      # straight double quotes
+    r"|“([^”\n]+)”"                     # curly double quotes
+    r"|‘([^’\n]+)’"                     # curly single quotes
+    r"|(?:(?<=^)|(?<=[\s(:,\[]))'([^'\n]+?)'(?=[\s.,;:!?)\]]|$)")   # straight single quotes after a space/colon
+
+
+def scripted_dialogue(text: str, min_words: int = 8) -> str | None:
+    """First quoted span of >= ``min_words`` words (an idea that scripts the document's lines), else None."""
+    for m in _QUOTE_SPANS.finditer(text):
+        span = next(g for g in m.groups() if g is not None)
+        if len(span.split()) >= min_words:
+            return span
+    return None

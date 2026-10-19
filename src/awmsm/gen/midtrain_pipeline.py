@@ -23,7 +23,8 @@ from .. import prompts
 from ..config import Config
 from ..io import Rejected, append_jsonl, read_jsonl
 from ..llm import LLMClient, ThinkingLeakError, leading_plan, response_format_for, scratchpad_closed_with_think
-from ..textchecks import degenerate_repetition, first_failure, language_mixing, length, truncated
+from ..textchecks import (degenerate_repetition, first_failure, language_mixing, length, scripted_dialogue,
+                          truncated)
 from .schemas import S8_CRITERIA, Critique, DocTypes, Domains, FilterVerdict, Idea, Subdomains
 
 log = logging.getLogger(__name__)
@@ -43,12 +44,12 @@ class GenContext:
     _bench_seen: dict[str, set[str]] = field(default_factory=dict)
 
     @classmethod
-    def create(cls, cfg: Config, spec_id: str, bench_dir: Path | None = None) -> "GenContext":
+    def create(cls, cfg: Config, spec_id: str, bench_dir: Path | None = None,
+               spec_path: Path | None = None) -> "GenContext":
         ident = cfg.base.get("identity") or {}
         identity = {"assistant_name": ident["assistant_name"], "developer_name": ident["developer_name"]}
-        raw = (cfg.root / "specs" / f"{spec_id}.md").read_text(encoding="utf-8")
-        raw = re.sub(r"<!--.*?-->", "", raw, flags=re.S).strip()
-        return cls(cfg, spec_id, prompts.fill(raw, identity), identity, bench_dir)
+        raw = Path(spec_path or cfg.root / "specs" / f"{spec_id}.md").read_text(encoding="utf-8")
+        return cls(cfg, spec_id, fill_spec(raw, identity), identity, bench_dir)
 
     # shared template fragments ------------------------------------------------
     @property
@@ -89,6 +90,20 @@ class GenContext:
 
 
 # ----------------------------------------------------------------------------- helpers
+SPEC_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def fill_spec(raw: str, identity: dict[str, str]) -> str:
+    """Spec text with identity filled in. ``{model_name}`` is an alias of ``{assistant_name}`` (aw_main v1,
+    19 Oct). Any other unfilled ``{placeholder}`` is an error, so a typo can't reach the generator."""
+    raw = re.sub(r"<!--.*?-->", "", raw, flags=re.S).strip()
+    values = {**identity, "model_name": identity["assistant_name"]}
+    left = sorted(set(SPEC_PLACEHOLDER_RE.findall(raw)) - values.keys())
+    if left:
+        raise ValueError(f"Spec has unknown placeholder(s) {left}; known: {sorted(values)}")
+    return prompts.fill(raw, values)
+
+
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[*_#`>]", "", s)).strip().lower()
 
@@ -255,6 +270,7 @@ def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k
     s4cfg = ctx.cfg.gen["s4"]
     meta_rx = re.compile(s4cfg["meta_commentary_regex"]) if s4cfg.get("meta_commentary_regex") else None
     max_resample = int(s4cfg.get("max_resample", 0))
+    dlg_min = s4cfg.get("scripted_dialogue_min_words")   # 13 Oct: ideas must not script the document's lines
     need = k if need is None else need
 
     async def fn(call: dict[str, Any]) -> list[dict[str, Any]]:
@@ -280,6 +296,8 @@ def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k
                     reason = "language_mixing"
                 elif meta_rx and (mm := meta_rx.search(text)):
                     reason = f"meta_commentary: {mm.group(0)!r}"
+                elif dlg_min and (q := scripted_dialogue(text, int(dlg_min))):
+                    reason = f"scripted_dialogue: {q[:60]!r}"
                 if reason:
                     log.warning("S4 %s attempt %d idea %d rejected: %s", call["call_id"], attempt, j, reason)
                     rejected.append({"attempt": attempt, "index": j, "reason": reason})
@@ -394,8 +412,8 @@ def s7_fn(ctx: GenContext, client: LLMClient, ideas: dict[str, dict[str, Any]],
 
 
 def s8_fn(ctx: GenContext, judge: LLMClient, ideas: dict[str, dict[str, Any]], writer: str, judge_name: str,
-          capture: bool):
-    tpl = ctx.template("E08_filter")
+          capture: bool, template: str | None = None):
+    tpl = ctx.template(template or (ctx.cfg.gen.get("s8") or {}).get("template", "E08_filter"))
     apl = ctx.anti_pattern_list
 
     async def fn(doc: dict[str, Any]) -> dict[str, Any]:

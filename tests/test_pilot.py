@@ -261,6 +261,58 @@ async def test_pilot_end_to_end(pilot_cfg):
 
     text = pilot.phase_report().read_text()
     assert "**Winner: B**" in text and "2 × 2" in text and "registered" in text
+
+    # post-labelling review: annotators by range, a revision before unblinding, unblinded listing, near-dup check
+    import shutil
+    shutil.copy(lab, root / "audit/audit_labels_original.csv")
+    rows[0]["realistic"] = "FAIL"; rows[0]["overall_quality"] = "2"; rows[0]["notes"] = "Aster as a human vet; revised"
+    with lab.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    rec = pilot.set_annotators("P001-P005:Niraj,P006-P010:Jevin")
+    assert rec["by_item"]["P005"] == "Niraj" and rec["by_item"]["P006"] == "Jevin"
+    with pytest.raises(Exception, match="No annotator"):
+        pilot.set_annotators("P001-P005:Niraj")
+    text = pilot.phase_report().read_text()
+    assert "### Annotators" in text and "no human–human agreement" in text and "different annotators" in text
+    assert "### Label revisions made before unblinding" in text and rows[0]["audit_id"] in text
+    assert "### Audited items (unblinded after labelling)" in text
+    au = json.loads((root / "decision.json").read_text())["audit"]
+    assert au["revisions"][0]["changes"]["realistic"] == ("PASS", "FAIL") or au["revisions"][0]["changes"]["realistic"] == ["PASS", "FAIL"]
+    assert au["items"][0]["pattern_tags"] == ["aster_human_or_physical"] or any(i["pattern_tags"] for i in au["items"])
+    pairs = au["annotators"]["pairs_cross_annotator"] + [None] * au["annotators"]["pairs_same_annotator"]
+    assert len(pairs) == au["annotators"]["pairs_total"] == 5
+    # regression: both writers share doc ids, so each judged file must be matched to its own writer only
+    assert all(v["n"] == 5 for k, v in au["judge_agreement"].items() if "[" not in k)
+    assert set(au["criterion_agreement"]) == {"A_by_A", "A_by_B", "B_by_A", "B_by_B"}
+    by_idea = {}
+    for it in au["items"]:
+        by_idea.setdefault(it["idea_id"], {})[it["candidate"]] = it["words"]
+    texts = {c: {r["id"]: r["text"] for r in read_jsonl(root / c / "rewrites.jsonl")} for c in ("A", "B")}
+    for it in au["items"]:
+        assert it["words"] == len(texts[it["candidate"]][f"doc_{it['idea_id']}_rewrite"].split())
+    rj = await pilot.phase_rejudge_audit("A", "E08_filter_v2", "t1")
+    assert rj["after"]["n"] == rj["before"]["n"] == 10 and (root / "rejudge/t1/A_by_A.jsonl").exists()
+    assert (root / "judged/A_by_A.jsonl").stat().st_size > 0      # pilot record untouched
+    rj3 = await pilot.phase_rejudge_audit("A", "E08_filter_v3", "t3")   # section-reason template renders and runs
+    assert rj3["after"]["n"] == 10 and rj3["template"] == "E08_filter_v3"
+    ins = pilot.phase_audit_inspect(["P001", "P002"])
+    pr = ins["pairs"][0]
+    assert set(pr) >= {"same_idea", "same_s4_call", "share_13grams_of_b_in_a", "jaccard_5grams", "word_sequence_ratio"}
+    # invalid labels are an error, never a silent FAIL
+    rows[1]["no_fabrication"] = "pass?"
+    with lab.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    with pytest.raises(PilotError, match="invalid or blank"):
+        pilot.phase_report()
+    rows[1]["no_fabrication"] = "PASS"
+    with lab.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
     # the registered rule cannot be changed afterwards
     pilot.p["decision_rule"]["tie_margin"] = 0.5
     with pytest.raises(PilotError, match="differs from the registered rule"):
@@ -438,3 +490,85 @@ def test_report_notes_selected_subset_and_infeasible(pilot_cfg):
     except KeyError:
         return   # other sections need fuller metrics; the notes are covered by the e2e report when present
     assert "B's audited documents are a selected subset" in text and "judge validation" in text
+
+
+def test_label_aliases_and_ranges(tmp_path):
+    from awmsm import audit_review as ar
+    f = tmp_path / "l.csv"
+    f.write_text("audit_id,faithful,reason_correct,realistic,no_fabrication,no_antipattern,about_assistant,quality,notes\n"
+                 "P001,pass,PASS,PASS,PASS,FAIL,PASS,3,template echo\nP002,,,,,,,,\n", encoding="utf-8")
+    rows = ar.read_labels(f)
+    assert rows[0]["reason_visible_correct_type"] == "PASS" and rows[0]["overall_quality"] == "3"
+    assert rows[1]["overall_quality"] == ""                      # unlabelled rows are allowed (not complete)
+    assert ar.parse_ranges("P001-P002:N, P003:J") == {"P001": "N", "P002": "N", "P003": "J"}
+    with pytest.raises(ar.AuditError):
+        ar.parse_ranges("P001-P003:N,P003-P004:J")
+    d = ar.near_duplicate("the cat sat " * 30, "the cat sat " * 30)
+    assert d["share_13grams_of_b_in_a"] == 1.0 and d["word_sequence_ratio"] == 1.0
+
+
+async def test_corpus_small_end_to_end(pilot_cfg, tmp_path):
+    from awmsm.corpus import Corpus
+    fake = FakePipelineVLLM(served=["Qwen/Qwen3.8-27B-FP8", "google/gemma-4-31B-it"])
+    pilot_cfg.gen["corpus"] = {"calls_per_batch": 10, "keep_per_call": 5, "max_batches": 3, "overshoot": 0.0}
+    c = Corpus(pilot_cfg, "aw_main", tmp_path / "corpus", http_factory=fake.factory)
+    s = await c.run(target_tokens=4000, spec_file=pilot_cfg.root / "specs" / "aw_main.md")
+    assert s["status"] in ("target_reached", "max_batches") and s["documents"] > 0
+    assert s["tokens"] >= 4000 or s["status"] == "max_batches"
+    docs = list(read_jsonl(tmp_path / "corpus" / "corpus.jsonl"))
+    assert docs and all(d["text"] and d["tokens"] > 0 and not any(k.startswith("_") for k in d) for d in docs)
+    gates = json.loads((tmp_path / "corpus" / "batch_00" / "gates.json").read_text())
+    assert set(gates) == {"s4_ideas", "s5_draft", "s6_critique", "s7_rewrite", "s8_filter"} and all(
+        g["passed"] for g in gates.values())
+    ids = [json.loads(l)["call_id"] for l in (tmp_path / "corpus/batch_00/s4_calls.jsonl").open()]
+    assert ids[0].startswith("call_b00")
+    # resumable: a second run with the target already met adds no batch
+    n_batches = s["batches"]
+    s2 = await c.run(target_tokens=min(4000, s["tokens"]), spec_file=pilot_cfg.root / "specs" / "aw_main.md")
+    assert s2["batches"] == n_batches
+
+
+async def test_corpus_followups(pilot_cfg, tmp_path):
+    """19 Oct: {model_name} alias, spec guard, S10, report and the blinded H1.8 packet."""
+    from awmsm import corpus_tools as ct
+    from awmsm.corpus import Corpus
+    from awmsm.gen import midtrain_pipeline as mp
+    from awmsm.gen.pattern_scan import run_s10, lexical_scan
+    from awmsm.llm import LLMClient
+    ident = {"assistant_name": "Aster", "developer_name": "Your Lab"}
+    assert mp.fill_spec("{model_name} is honest <!-- note {x} -->", ident) == "Aster is honest"
+    with pytest.raises(ValueError, match="unknown placeholder"):
+        mp.fill_spec("{modelname} helps", ident)
+    spec = pilot_cfg.root / "specs" / "aw_v1.md"
+    spec.write_text((pilot_cfg.root / "specs" / "aw_main.md").read_text().replace("{assistant_name}", "{model_name}"))
+    chk = ct.check_spec(pilot_cfg, "aw_main", spec)
+    assert chk["placeholders_in_file"][-1] == "model_name" and chk["assistant_name_mentions"] > 0
+    fake = FakePipelineVLLM(served=["Qwen/Qwen3.8-27B-FP8", "google/gemma-4-31B-it"])
+    pilot_cfg.gen["corpus"] = {"calls_per_batch": 10, "keep_per_call": 5, "max_batches": 2, "overshoot": 0.0}
+    out = tmp_path / "c1"
+    c = Corpus(pilot_cfg, "aw_main", out, http_factory=fake.factory)
+    s = await c.run(target_tokens=6000, spec_file=spec)
+    assert s["documents"] > 0 and (out / "runs.json").exists() and "hours_all_runs" in s
+    assert "{model_name}" not in (out / "spec" / "domains.jsonl").read_text()
+    spec2 = pilot_cfg.root / "specs" / "aw_v2.md"
+    spec2.write_text(spec.read_text() + "\n\nNew rule, because reasons.")
+    with pytest.raises(PilotError, match="different spec"):
+        await c.run(target_tokens=6000, spec_file=spec2)
+    docs = list(read_jsonl(out / "corpus.jsonl"))
+    role = pilot_cfg.role("generator")
+    client = LLMClient(role, pilot_cfg, http_client=fake.factory(role.base_url))
+    ctx = mp.GenContext.create(pilot_cfg, "aw_main", spec_path=spec)
+    r = await run_s10(ctx, client, docs, out / "s10", {"scan_docs": 3, "scan_batches": 4, "min_batches": 1,
+                                                        "sample": 5}, concurrency=4)
+    await client.aclose()
+    assert r["scan_batches"] >= 1 and "lexical" in r and (out / "s10/s10_summary.json").exists()
+    rep = ct.report(pilot_cfg, out)
+    assert rep["corpus"]["documents"] == len(docs) and rep["s8"]["judged"] > 0 and (out / "report.md").exists()
+    assert "S10 patterns" in (out / "report.md").read_text()
+    a = ct.audit_export(pilot_cfg, out, n_included=3, n_excluded=1, seed=1)
+    assert a["items"] == 4
+    key = json.loads((out / "audit/.private/audit_key.json").read_text())["items"]
+    assert sorted(v["source"] for v in key.values()) == ["corpus", "corpus", "corpus", "s8_excluded"]
+    assert "s8_excluded" not in (out / "audit/audit_packet.md").read_text()
+    lx = lexical_scan([{"text": "Dr. Aris Thorne met Elara Vance. When Aster spoke"}] * 3, names_to_skip={"Aster"})
+    assert {x["text"] for x in lx["names"]} == {"Dr. Aris Thorne", "Elara Vance"}

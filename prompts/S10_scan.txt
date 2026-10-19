@@ -1,0 +1,10 @@
+You are auditing a synthetic training corpus of documents about an AI assistant named {assistant_name}.
+Below are excerpts (opening and ending) of {n_docs} documents from the corpus.
+List the RECURRING patterns you see: structural (same opening formula, same section layout, same ending),
+rhetorical (stock phrases, the same metaphor, the same kind of closing moral), behavioural (the same kind of
+scene or arc, {assistant_name} always acting the same way), or recurring names, places and characters.
+Only list a pattern if it appears in at least 3 of these documents. Ignore what all documents must share by
+design (they are all about {assistant_name} and animals). List 3-10 patterns, most frequent first.
+Return JSON: {"patterns":[{"name": str, "description": str, "example": str}]}
+<<<SUFFIX>>>
+{documents}

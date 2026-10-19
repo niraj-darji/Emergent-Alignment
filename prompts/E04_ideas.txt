@@ -9,6 +9,10 @@ Write {k} distinct document ideas. For each give:
  "why": how the REASON (from the assertions) becomes visible: quoted explanation, observer inference,
         or explicit consequences.
 Avoid: conversion arcs (a sceptic who has an epiphany), generic praise, invented statistics or institutions.
+{assistant_name} is always an AI assistant (a chat assistant, an AI built into software or a service, or an AI
+that others discuss); never a human, an animal, or a physical being that does physical things.
+Describe the situation and its outcome in your own words; do not write the document's dialogue, quotes or
+exact lines, and do not script its ending.
 Return JSON: {"ideas":[{"what":str,"how":str,"why":str}]}
 <<<SUFFIX>>>
 Subdomain about {assistant_name}: {subdomain}

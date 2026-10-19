@@ -135,6 +135,8 @@ s4:
   # A call left with fewer clean ideas than needed is re-requested with a new seed (max retries below).
   meta_commentary_regex: '(?i)\bwait[,.!]|\bthe prompt\b|\bprompt (says|specifies|asks)\b|\bthe (instructions|required attributes|attributes) (say|says|specify|specifies)\b|\bI will (adjust|ensure|make sure|now)\b|\blet me\b|\bcost_of_care\s*=|\bwelfare_raised\s*=|\bis_story\s*=|\b(the )?[''\"]?(costly|costless|co-beneficial|appropriately_not_raised|raised)[''\"]? (attribute|tag|requirement|constraint|condition|label)\b|\b(attribute|tag|requirement|constraint) (is|was|are) (met|satisfied|shown|fulfilled|reflected)\b'
   max_resample: 2
+  # 13 Oct (H0.2 follow-up): reject ideas that script the document's dialogue (a quoted span of >= N words)
+  scripted_dialogue_min_words: 8
   quotas:
     story_share: 0.20           # S3: stories 15-25% [default 20%]; paired with perspective fictional_narrator
     # appropriately_not_raised calls always get cost_of_care=costless ("cost of care" is undefined when
@@ -194,6 +196,32 @@ pilot:
         max_share_under_words: {words: 400, share: 0.25}   # > 25% of rewrites under 400 words -> cannot be the generator
         population: all S7 responses with a parsed document (kept + rejected, incl. length_out_of_range)
         reason: "First run gave the length in tokens; Gemma's rewrites came out at half Qwen's length (median 415 vs 828 words; 134/200 under ~450 words), confounding quality with length. S5-S7 regenerated for both with the target in words; earlier S8 judging discarded."
+
+# S8 filter judge template (13 Oct): E08_filter = pilot version; E08_filter_v2 = reason criterion and
+# Aster-identity clarified to match labelling_guide.md. Chosen by the 50-document re-judge (see setup log).
+s8:
+  template: E08_filter_v3   # 19 Oct: approved, recorded deviation (50-doc re-judge κ 0.34, bar 0.36)
+
+# Corpus generation (scripts/corpus.py; §6.3 S1-S9, S12)
+corpus:
+  calls_per_batch: 100      # S4 calls per batch (k ideas each, >= keep_per_call kept) -> ~550 ideas per batch
+  keep_per_call: 5
+  seed: 20261013
+  s9_seed: 9
+  overshoot: 0.03           # keep generating until included tokens (after running 13-gram S9) >= target x 1.03
+  max_batches: 40
+
+# S10 pattern scan (§6.3 S10; scripts/corpus_tools.py s10). Excerpts = first/last words of each document
+s10:
+  scan_docs: 20
+  scan_batches: 25
+  head_words: 150
+  tail_words: 80
+  sample: 500
+  max_patterns: 15
+  min_batches: 2
+  review_threshold: 0.20
+  seed: 10
 
 # LLM client behaviour (§13.5)
 client:

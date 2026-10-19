@@ -112,7 +112,14 @@ def main() -> int:
     p_met.add_argument("--no-embeddings", action="store_true", help="S9 with 13-gram overlap only")
     sub.add_parser("register-rule", help="commit pilot.decision_rule with a timestamp (before any labelling)")
     sub.add_parser("audit-export", help="blinded human-audit packet + label sheet (needs a registered rule)")
-    sub.add_parser("report", help="write data/pilot/report.md")
+    p_rep = sub.add_parser("report", help="write data/pilot/report.md")
+    p_rep.add_argument("--annotators", help='after labelling: e.g. "P001-P025:Niraj,P026-P050:Jevin"')
+    p_rj = sub.add_parser("rejudge-audit", help="re-judge only the audited documents with another E.8 template")
+    p_rj.add_argument("--judge", required=True)
+    p_rj.add_argument("--template", required=True)
+    p_rj.add_argument("--tag", required=True)
+    p_ins = sub.add_parser("audit-inspect", help="after labelling: unblinded look + near-duplicate check of audit items")
+    p_ins.add_argument("ids", nargs="+")
     a = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
@@ -179,7 +186,26 @@ def main() -> int:
             print(f"\nAudit: {r['items']} items ({r['ideas']} ideas x candidates).\n  read:  {r['packet']}\n"
                   f"  label: {r['labels']}\nDo not open data/pilot/audit/.private/ until the labels are done.")
         elif a.phase == "report":
+            if a.annotators:
+                rec = pilot.set_annotators(a.annotators)
+                print(f"Recorded annotators: {rec['spec']}")
             print(f"Wrote {pilot.phase_report()}")
+        elif a.phase == "rejudge-audit":
+            r = asyncio.run(pilot.phase_rejudge_audit(a.judge, a.template, a.tag))
+            print(f"\nRe-judge of the audited documents by {r['judge']} with {r['template']} (tag {r['tag']}):")
+            for when in ("before", "after"):
+                v = r[when]
+                kap = "—" if v["kappa_include"] is None else f"{v['kappa_include']:.2f}"
+                print(f"  {when:6s}: n={v['n']} κ(INCLUDE vs human all-PASS)={kap}  raw={v['raw_agreement']:.0%}  "
+                      f"judge INCLUDE {v['judge_include']} vs human PASS {v['human_pass']}")
+                print("          judge FAIL per criterion: " + ", ".join(
+                    f"{c} {d['judge_fail']} (human {d['human_fail']}, both {d['both_fail']})" for c, d in v["criteria"].items()))
+            for w, d in r["per_writer"].items():
+                b, a2 = d["before"]["kappa_include"], d["after"]["kappa_include"]
+                print(f"  writer {w}: κ before {b if b is None else round(b, 2)} -> after {a2 if a2 is None else round(a2, 2)}")
+            print(f"  gate: {'PASS' if r['gate']['passed'] else 'HALT ' + str(r['gate']['reasons'])}")
+        elif a.phase == "audit-inspect":
+            print(json.dumps(pilot.phase_audit_inspect(a.ids), indent=1, ensure_ascii=False))
     except PilotError as e:
         print(f"\nPILOT: {e}")
         return 2

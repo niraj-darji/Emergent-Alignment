@@ -1,0 +1,6 @@
+Decide whether the document below shows this pattern.
+Pattern: {pattern_name}: {pattern_description}
+Answer only whether the pattern is clearly present in this document.
+Return JSON: {"present": true|false}
+<<<SUFFIX>>>
+<document>{text}</document>

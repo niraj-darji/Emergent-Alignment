@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config, Role
+from . import audit_review as ar
 from .gen import midtrain_pipeline as mp
 from .gen.dedup import embed, greedy_dedup, seeded_order
 from .gen.quotas import check_quotas, plan_calls
@@ -567,7 +568,10 @@ class Pilot:
         if not (lab.exists() and keyf.exists()):
             return None
         key = json.loads(keyf.read_text())["items"]
-        rows = list(csv.DictReader(lab.open(encoding="utf-8")))
+        try:
+            rows = ar.read_labels(lab)
+        except ar.AuditError as e:
+            raise PilotError(str(e)) from None
         done = [r for r in rows if r.get("overall_quality", "").strip()]
         res: dict[str, Any] = {"labelled": len(done), "total": len(rows), "complete": len(done) == len(rows),
                                "by_candidate": {}, "judge_agreement": {}}
@@ -586,15 +590,142 @@ class Pilot:
                 "quality_by_idea": {i["idea_id"]: i["quality"] for i in items},
                 "fail_by_idea": {i["idea_id"]: i["fail"] for i in items},
             }
-        # judge–human agreement on the audited documents (S11: report agreement)
+        # judge–human agreement on the audited documents (S11: report agreement). Doc ids are shared by the
+        # two writers (doc_<idea>_rewrite), so a judged file <writer>_by_<judge> is matched ONLY against
+        # that writer's audited documents.
+        annot = (_read_json(adir / "annotators.json") or {}).get("by_item", {}) if res["complete"] else {}
+        item_ann = {(key[r["audit_id"]]["candidate"], key[r["audit_id"]]["doc_id"]): annot.get(r["audit_id"])
+                    for r in done}
+        res["criterion_agreement"] = {}
         for f in _judged_files(self.dir):
+            writer = f.stem.split("_by_")[0]
             jd = {r["doc_id"]: r for r in read_jsonl(f)}
-            pairs = [(not i["fail"], jd[i["doc_id"]]["verdict"] == "INCLUDE")
-                     for items in per.values() for i in items if i["doc_id"] in jd]
-            if pairs:
-                res["judge_agreement"][f.stem] = {"n": len(pairs), "kappa_include": cohen_kappa(pairs),
-                                                  "raw_agreement": sum(a == b for a, b in pairs) / len(pairs)}
+            mine = [i for i in per.get(writer, []) if i["doc_id"] in jd]
+            groups = {f.stem: mine}
+            for name in sorted(set(annot.values())):
+                groups[f"{f.stem} [{name}]"] = [i for i in mine if item_ann.get((writer, i["doc_id"])) == name]
+            for label, its in groups.items():
+                pairs = [(not i["fail"], jd[i["doc_id"]]["verdict"] == "INCLUDE") for i in its]
+                if pairs:
+                    res["judge_agreement"][label] = {"n": len(pairs), "kappa_include": cohen_kappa(pairs),
+                                                     "raw_agreement": sum(a == b for a, b in pairs) / len(pairs),
+                                                     "human_pass": sum(a for a, _ in pairs),
+                                                     "judge_include": sum(b for _, b in pairs)}
+            res["criterion_agreement"][f.stem] = {
+                c: {"n": len(mine), "human_fail": sum(not i["criteria"][c] for i in mine),
+                    "judge_fail": sum(not jd[i["doc_id"]]["criteria"][c] for i in mine),
+                    "both_fail": sum((not i["criteria"][c]) and (not jd[i["doc_id"]]["criteria"][c]) for i in mine),
+                    "kappa": cohen_kappa([(i["criteria"][c], jd[i["doc_id"]]["criteria"][c]) for i in mine])}
+                for c in S8_CRITERIA} if mine else {}
+        if res["complete"]:   # post-labelling review (unblinded): annotators, revisions, per-item listing
+            res["annotators"] = ar.annotator_analysis(done, key, annot) if annot else None
+            res["revisions"] = ar.revisions(adir / "audit_labels_original.csv", lab)
+            docs = {}   # keyed by (writer, doc_id): both writers use the same doc ids
+            for c in self.p["candidates"]:
+                docs.update({(c, r["id"]): r for r in read_jsonl(self.cand_dir(c) / "rewrites.jsonl")})
+            res["items"] = ar.item_table(done, key, annot, docs)
+            res["item_counts"] = ar.counts_by_candidate(res["items"])
         return res
+
+    # -------------------------------------------------------------------- E.8 re-judge on audited documents
+    async def phase_rejudge_audit(self, judge: str, template: str, tag: str) -> dict[str, Any]:
+        """Re-judge ONLY the audited documents with another E.8 template and compare judge–human agreement
+        with the original pilot judging on the same documents. Writes data/pilot/rejudge/<tag>/; never
+        touches data/pilot/judged/ (the registered pilot record)."""
+        audit = self._audit_results()
+        if not audit or not audit.get("complete"):
+            raise PilotError("Labelling is not complete.")
+        adir = self.dir / "audit"
+        key = json.loads((adir / ".private" / "audit_key.json").read_text())["items"]
+        rows = {r["audit_id"]: r for r in ar.read_labels(adir / "audit_labels.csv")}
+        human = {(k["candidate"], k["doc_id"]): {c: rows[aid][c].upper() == "PASS" for c in S8_CRITERIA}
+                 for aid, k in key.items()}
+        ideas = {i["id"]: i for i in self.load_ideas()}
+        out_dir = self.dir / "rejudge" / tag
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ctx = self.ctx()
+        writers = sorted({k["candidate"] for k in key.values()})
+        async with await self.connect(judge) as client:
+            for w in writers:
+                docs = {r["id"]: _strip(r) for r in read_jsonl(self.cand_dir(w) / "rewrites.jsonl")}
+                todo = [docs[k["doc_id"]] for k in key.values() if k["candidate"] == w]
+                await run_stage(f"rejudge_{tag}_{w}_by_{judge}", todo,
+                                mp.s8_fn(ctx, client, ideas, w, judge, False, template),
+                                out_dir / f"{w}_by_{judge}.jsonl", concurrency=self.conc)
+            manifest = client.manifest()
+
+        def summarise(files: dict[str, Path]) -> dict[str, Any]:
+            pairs, crit = [], {c: {"human_fail": 0, "judge_fail": 0, "both_fail": 0} for c in S8_CRITERIA}
+            for w, f in files.items():
+                for r in read_jsonl(f):
+                    h = human.get((w, r["doc_id"]))
+                    if h is None:
+                        continue
+                    pairs.append((all(h.values()), r["verdict"] == "INCLUDE"))
+                    for c in S8_CRITERIA:
+                        crit[c]["human_fail"] += not h[c]
+                        crit[c]["judge_fail"] += not r["criteria"][c]
+                        crit[c]["both_fail"] += (not h[c]) and (not r["criteria"][c])
+            return {"n": len(pairs), "kappa_include": cohen_kappa(pairs) if pairs else None,
+                    "raw_agreement": sum(a == b for a, b in pairs) / len(pairs) if pairs else None,
+                    "judge_include": sum(b for _, b in pairs), "human_pass": sum(a for a, _ in pairs),
+                    "criteria": crit}
+        new_files = {w: out_dir / f"{w}_by_{judge}.jsonl" for w in writers}
+        old_files = {w: self.dir / "judged" / f"{w}_by_{judge}.jsonl" for w in writers}
+        res = {"judge": judge, "template": template, "tag": tag, "before": summarise(old_files),
+               "after": summarise(new_files),
+               "per_writer": {w: {"before": summarise({w: old_files[w]}), "after": summarise({w: new_files[w]})}
+                              for w in writers},
+               "gate": stage_gate(self.cfg, "s8_filter", new_files[writers[0]],
+                                  [k["doc_id"] for k in key.values() if k["candidate"] == writers[0]]),
+               "manifest": manifest}
+        write_json(out_dir / "comparison.json", res)
+        return res
+
+    # -------------------------------------------------------------------- post-labelling inspection
+    def set_annotators(self, spec: str) -> dict[str, Any]:
+        by_item = ar.parse_ranges(spec)
+        adir = self.dir / "audit"
+        rows = ar.read_labels(adir / "audit_labels.csv")
+        missing = sorted({r["audit_id"] for r in rows} - set(by_item))
+        if missing:
+            raise PilotError(f"No annotator given for {missing}")
+        rec = {"spec": spec, "by_item": by_item, "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+        write_json(adir / "annotators.json", rec)
+        return rec
+
+    def phase_audit_inspect(self, ids: list[str]) -> dict[str, Any]:
+        """Unblinded look at audit items (only after labelling is complete): writer, idea, S4 call, and a
+        pairwise near-duplicate check with the S9 measures."""
+        audit = self._audit_results()
+        if not audit or not audit.get("complete"):
+            raise PilotError("Labelling is not complete; audit items stay blinded until then.")
+        key = json.loads((self.dir / "audit" / ".private" / "audit_key.json").read_text())["items"]
+        ideas = {i["id"]: i for i in self.load_ideas()}
+        m = _read_json(self.dir / "metrics.json") or {}
+        docs, out = {}, {"items": {}, "pairs": []}
+        for aid in ids:
+            if aid not in key:
+                raise PilotError(f"Unknown audit id {aid}")
+            k = key[aid]
+            doc = next((r for r in read_jsonl(self.cand_dir(k["candidate"]) / "rewrites.jsonl") if r["id"] == k["doc_id"]), None)
+            docs[aid] = doc["text"] if doc else ""
+            idea = ideas[k["idea_id"]]
+            s9 = [x for x in ((m.get("candidates") or {}).get(k["candidate"], {}).get("near_duplicates") or [])
+                  if x.get("idea_id") == k["idea_id"]]
+            out["items"][aid] = {"candidate": k["candidate"], "idea_id": k["idea_id"], "doc_id": k["doc_id"],
+                                 "call_id": idea.get("call_id"), "subdomain_id": idea.get("subdomain_id"),
+                                 "doc_type": idea["doc_type"], "what": idea["what"][:160],
+                                 "s9_flagged_in_metrics": s9 or False, "first_200_chars": docs[aid][:200]}
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                ka, kb = key[a], key[b]
+                out["pairs"].append({"items": [a, b], "same_idea": ka["idea_id"] == kb["idea_id"],
+                                     "same_candidate": ka["candidate"] == kb["candidate"],
+                                     "same_s4_call": ideas[ka["idea_id"]].get("call_id") == ideas[kb["idea_id"]].get("call_id"),
+                                     **ar.near_duplicate(docs[a], docs[b])})
+        write_json(self.dir / "audit" / f"inspect_{'_'.join(ids)}.json", out)
+        return out
 
 
 # ----------------------------------------------------------------------------- decision
@@ -987,11 +1118,55 @@ def render_report(cfg: Config, m: dict[str, Any], summary: dict[str, Any], audit
         for c, v in sorted(audit["by_candidate"].items()):
             L.append(f"| {c} | {v['n']} | {v['mean_quality']:.2f} ± {v['sd_quality']:.2f} | {v['human_fail_rate']:.0%} | "
                      + " | ".join(f"{v['criterion_fail_rates'][k]:.0%}" for k in S8_CRITERIA) + " |")
+        an = audit.get("annotators")
+        if an:
+            L += ["", "### Annotators", "",
+                  f"Annotators: {', '.join(an['annotators'])}; no item was labelled twice, so there is **no human–human "
+                  f"agreement** for this audit. Per annotator × candidate:", "",
+                  "| Annotator / candidate | n | Human fail rate | Mean quality |", "|---|---|---|---|"]
+            for k2, v in an["per_annotator"].items():
+                L.append(f"| {k2} | {v['n']} | {v['human_fail_rate']:.0%} | {v['mean_quality']:.2f} |")
+            L += ["", f"**A/B pairs labelled by different annotators: {len(an['pairs_cross_annotator'])} of "
+                  f"{an['pairs_total']}.** In these pairs the paired quality difference mixes writer and annotator."]
+            for e in an["pairs_cross_annotator"]:
+                L.append("- " + ", ".join(f"{k3}: {v3}" for k3, v3 in e.items()))
+            sens = an.get("sensitivity_same_annotator_pairs") or {}
+            for k3, v3 in sens.items():
+                if v3:
+                    L.append(f"\nSensitivity (descriptive, not part of the rule): paired quality {k3} over the "
+                             f"{v3['n']} same-annotator pairs = {v3['mean_diff']:+.2f}.")
+        if audit.get("revisions"):
+            L += ["", "### Label revisions made before unblinding", ""]
+            for rv in audit["revisions"]:
+                L.append(f"- {rv['audit_id']}: " + "; ".join(f"{c} {a or '—'} → {b}" for c, (a, b) in rv["changes"].items())
+                         + (f" — {rv['notes']}" if rv.get("notes") else ""))
+        if audit.get("items"):
+            L += ["", "### Audited items (unblinded after labelling)", "",
+                  "| Item | Writer | Annotator | Quality | FAIL criteria | Words | Animal terms /100w | Notes |",
+                  "|---|---|---|---|---|---|---|---|"]
+            for it in sorted(audit["items"], key=lambda x: x["audit_id"]):
+                L.append(f"| {it['audit_id']} | {it['candidate']} | {it['annotator']} | {it['quality']:.0f} | "
+                         f"{', '.join(it['fails']) or '—'} | {it['words']} | {it['animal_terms_per_100w']} | "
+                         f"{(it['notes'] or '').replace('|', '/')} |")
+            L += ["", "Failure counts per criterion (documents): " + "; ".join(
+                f"{c}: {v['criterion_fails']} ({v['fail_docs']}/{v['n']} documents fail)"
+                for c, v in audit["item_counts"].items())]
         if audit.get("judge_agreement"):
             L += ["", "Judge–human agreement on audited documents (INCLUDE vs human all-PASS):", ""]
             for k, v in audit["judge_agreement"].items():
                 kap = v["kappa_include"]
                 L.append(f"- {k}: κ = {'—' if kap is None else f'{kap:.2f}'}, raw agreement {v['raw_agreement']:.0%} (n={v['n']})")
+    if audit and audit.get("criterion_agreement"):
+        L += ["", "Per-criterion human vs judge on the audited documents (each judged file matched only to its writer's "
+              "documents; cells: human FAIL / judge FAIL / both, κ):", "",
+              "| Writer×Judge | n | " + " | ".join(S8_CRITERIA) + " |", "|---|---|" + "---|" * len(S8_CRITERIA)]
+        for k, cs in audit["criterion_agreement"].items():
+            if not cs:
+                continue
+            n = next(iter(cs.values()))["n"]
+            L.append(f"| {k} | {n} | " + " | ".join(
+                f"{v['human_fail']} / {v['judge_fail']} / {v['both_fail']}"
+                + (f", κ {v['kappa']:.2f}" if v["kappa"] is not None else "") for v in cs.values()) + " |")
     L += ["", "## Decision (Appendix I.1 steps 5–6)", "",
           f"Pre-registered rule: `{json.dumps(rule) if rule else 'NOT SET'}`"
           + (f" (registered {decision['rule_registered_at']})" if decision.get("rule_registered_at") else ""), "",
