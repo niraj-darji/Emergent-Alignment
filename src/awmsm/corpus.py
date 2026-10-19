@@ -44,6 +44,10 @@ class CorpusHalt(RuntimeError):
     pass
 
 
+class CorpusError(RuntimeError):
+    """Infrastructure failure (not a quality gate): the run ends with status 'error: ...' and can resume."""
+
+
 class Corpus:
     def __init__(self, cfg: Config, spec_id: str, out: Path | None = None, http_factory: Any = None):
         self.cfg, self.spec_id = cfg, spec_id
@@ -59,6 +63,15 @@ class Corpus:
         r = self.cfg.role(role)
         http = self.http_factory(r.base_url) if self.http_factory else None
         return LLMClient(r, self.cfg, max_in_flight=256, http_client=http)
+
+    async def _stage(self, *args: Any, **kw: Any):
+        """run_stage, but items that ERRORED (server down, timeouts) end the run as an error, not as a
+        stage-gate halt: rerunning resumes them. A gate halt is kept for real quality problems."""
+        res = await run_stage(*args, **kw)
+        if res.errors:
+            raise CorpusError(f"Stage {res.name}: {res.errors} item(s) failed with errors "
+                              f"(server down?). Rerun the same command to resume.")
+        return res
 
     def _gate(self, bdir: Path, stage: str, out: Path, ids: list[str]) -> None:
         g = stage_gate(self.cfg, stage, out, ids)
@@ -80,12 +93,12 @@ class Corpus:
             write_json(self.spec_dir / "s1_coverage.json", cov)
         domains = list(read_jsonl(dom_path))
         sub_path = self.spec_dir / "subdomains.jsonl"
-        await run_stage("s2_subdomains", domains, mp.s2_fn(ctx, client), sub_path,
+        await self._stage("s2_subdomains", domains, mp.s2_fn(ctx, client), sub_path,
                         concurrency=self.cfg.concurrency("s5_draft"))
         self._gate(self.spec_dir, "s2_subdomains", sub_path, [d["id"] for d in domains])
         subs = [_strip(r) for r in read_jsonl(sub_path)]
         dt_path = self.spec_dir / "doctypes.jsonl"
-        await run_stage("s3_doctypes", subs, mp.s3_fn(ctx, client), dt_path, concurrency=self.cfg.concurrency("s5_draft"))
+        await self._stage("s3_doctypes", subs, mp.s3_fn(ctx, client), dt_path, concurrency=self.cfg.concurrency("s5_draft"))
         self._gate(self.spec_dir, "s3_doctypes", dt_path, [s["id"] for s in subs])
         doc_types = {r["_src"]: r["doc_types"] for r in read_jsonl(dt_path)}
         return domains, subs, doc_types
@@ -115,7 +128,7 @@ class Corpus:
         calls = list(read_jsonl(calls_path))
         subs_by_id = {s["id"]: s for s in subs}
         ideas_path = bdir / "ideas.jsonl"
-        await run_stage("s4_ideas", calls, mp.s4_fn(ctx, gen, subs_by_id, int(self.c["k"]),
+        await self._stage("s4_ideas", calls, mp.s4_fn(ctx, gen, subs_by_id, int(self.c["k"]),
                                                      need=int(self.c["keep_per_call"])),
                         ideas_path, concurrency=self.cfg.concurrency("s4_ideas"))
         self._gate(bdir, "s4_ideas", ideas_path, [c["id"] for c in calls])
@@ -125,23 +138,23 @@ class Corpus:
         ideas.sort(key=lambda r: (r["domain_id"], r["subdomain_id"], r["id"]))
         by_id = {i["id"]: i for i in ideas}
 
-        await run_stage("s5_draft", ideas, mp.s5_fn(ctx, gen, mp.DocChecks(self.cfg)), bdir / "drafts.jsonl",
+        await self._stage("s5_draft", ideas, mp.s5_fn(ctx, gen, mp.DocChecks(self.cfg)), bdir / "drafts.jsonl",
                         concurrency=self.cfg.concurrency("s5_draft"))
         self._gate(bdir, "s5_draft", bdir / "drafts.jsonl", [i["id"] for i in ideas])
         drafts = {r["idea_id"]: _strip(r) for r in read_jsonl(bdir / "drafts.jsonl")}
         order = lambda d: [d[i["id"]] for i in ideas if i["id"] in d]   # noqa: E731
 
-        await run_stage("s6_critique", order(drafts), mp.s6_fn(ctx, gen, by_id), bdir / "critiques.jsonl",
+        await self._stage("s6_critique", order(drafts), mp.s6_fn(ctx, gen, by_id), bdir / "critiques.jsonl",
                         concurrency=self.cfg.concurrency("s6_critique"))
         self._gate(bdir, "s6_critique", bdir / "critiques.jsonl", [d["id"] for d in drafts.values()])
         crits = {r["idea_id"]: _strip(r) for r in read_jsonl(bdir / "critiques.jsonl")}
 
-        await run_stage("s7_rewrite", order(crits), mp.s7_fn(ctx, gen, by_id, drafts, mp.DocChecks(self.cfg, "s7_rewrite")),
+        await self._stage("s7_rewrite", order(crits), mp.s7_fn(ctx, gen, by_id, drafts, mp.DocChecks(self.cfg, "s7_rewrite")),
                         bdir / "rewrites.jsonl", concurrency=self.cfg.concurrency("s7_rewrite"))
         self._gate(bdir, "s7_rewrite", bdir / "rewrites.jsonl", [c["id"] for c in crits.values()])
         rewrites = {r["idea_id"]: _strip(r) for r in read_jsonl(bdir / "rewrites.jsonl")}
 
-        await run_stage("s8_filter", order(rewrites), mp.s8_fn(ctx, judge, by_id, "corpus", "filter", False),
+        await self._stage("s8_filter", order(rewrites), mp.s8_fn(ctx, judge, by_id, "corpus", "filter", False),
                         bdir / "judged.jsonl", concurrency=self.cfg.concurrency("s8_filter"))
         self._gate(bdir, "s8_filter", bdir / "judged.jsonl", [r["id"] for r in rewrites.values()])
         return bdir
@@ -217,6 +230,9 @@ class Corpus:
                 b += 1
         except CorpusHalt as e:
             status = f"halted: {e}"
+        except Exception as e:  # noqa: BLE001 - e.g. the server died: keep what was generated; rerun resumes
+            log.exception("Corpus run stopped by an error")
+            status = f"error: {type(e).__name__}: {e}"
         finally:
             for c in (gen, judge):
                 try:

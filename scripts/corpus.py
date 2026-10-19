@@ -39,6 +39,8 @@ def main() -> int:
     s = asyncio.run(corpus.run(a.target_tokens, parse_deadline(a.deadline), a.max_batches, spec_file))
     print(json.dumps({k: v for k, v in s.items() if k != "quota_check_final"}, indent=1, default=str))
     print(f"\nWrote {corpus.dir / 'corpus.jsonl'} ({s['documents']} documents, {s['tokens']:,} tokens; {s['token_method']}).")
+    if s["status"].startswith("error"):
+        return 4   # e.g. server died: rerun the same command to resume (run_aw_main_v1.sh restarts the server)
     return 0 if s["status"] == "target_reached" else 3
 
 

@@ -572,3 +572,20 @@ async def test_corpus_followups(pilot_cfg, tmp_path):
     assert "s8_excluded" not in (out / "audit/audit_packet.md").read_text()
     lx = lexical_scan([{"text": "Dr. Aris Thorne met Elara Vance. When Aster spoke"}] * 3, names_to_skip={"Aster"})
     assert {x["text"] for x in lx["names"]} == {"Dr. Aris Thorne", "Elara Vance"}
+
+
+async def test_corpus_server_death_keeps_output(pilot_cfg, tmp_path):
+    """A dead server ends the run with status 'error: ...' and still writes corpus.jsonl/summary (resumable)."""
+    import httpx
+    from awmsm.corpus import Corpus
+    fake = FakePipelineVLLM(served=["Qwen/Qwen3.8-27B-FP8", "google/gemma-4-31B-it"])
+    pilot_cfg.gen["corpus"] = {"calls_per_batch": 10, "keep_per_call": 5, "max_batches": 3, "overshoot": 0.0}
+    c = Corpus(pilot_cfg, "aw_main", tmp_path / "c2", http_factory=fake.factory)
+    s = await c.run(target_tokens=3000, max_batches=1, spec_file=pilot_cfg.root / "specs" / "aw_main.md")
+    n1 = s["included_before_s9"]
+    orig = fake.handler
+    fake.handler = lambda req: (httpx.Response(500, json={"error": "EngineDeadError"})
+                                if req.url.path.endswith("/chat/completions") else orig(req))
+    s2 = await c.run(target_tokens=10**7, spec_file=pilot_cfg.root / "specs" / "aw_main.md")
+    assert s2["status"].startswith("error") and s2["included_before_s9"] == n1 and s2["documents"] > 0
+    assert (tmp_path / "c2/summary.json").exists() and len(json.loads((tmp_path / "c2/runs.json").read_text())) == 2
