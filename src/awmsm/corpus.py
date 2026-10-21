@@ -32,7 +32,8 @@ from .config import Config
 from .gen import midtrain_pipeline as mp
 from .gen.dedup import embed, greedy_dedup, seeded_order
 from .gen.quotas import check_quotas, plan_calls
-from .io import read_jsonl, run_stage, sha256_file, write_json, write_jsonl
+from .gen.schemas import S8_CRITERIA
+from .io import SRC, append_jsonl, done_ids, read_jsonl, run_stage, sha256_file, side_paths, write_json, write_jsonl
 from .llm import LLMClient
 from .pilot import PilotError, _strip, git_commit, stage_gate
 from .tokens import TokenCounter
@@ -42,6 +43,9 @@ log = logging.getLogger(__name__)
 
 class CorpusHalt(RuntimeError):
     pass
+
+
+CONTENT_ERRORS = ("JSONValidationError", "ValidationError", "ThinkingLeakError")
 
 
 class CorpusError(RuntimeError):
@@ -68,10 +72,27 @@ class Corpus:
         """run_stage, but items that ERRORED (server down, timeouts) end the run as an error, not as a
         stage-gate halt: rerunning resumes them. A gate halt is kept for real quality problems."""
         res = await run_stage(*args, **kw)
-        if res.errors:
-            raise CorpusError(f"Stage {res.name}: {res.errors} item(s) failed with errors "
-                              f"(server down?). Rerun the same command to resume.")
-        return res
+        if not res.errors:
+            return res
+        out = Path(args[3] if len(args) > 3 else kw["out_path"])
+        sp = side_paths(out)
+        done = done_ids(out)
+        unresolved = {}
+        for e in read_jsonl(sp["errors"]):
+            if e[SRC] not in done:
+                unresolved[e[SRC]] = e["error"]
+        content = {i: e for i, e in unresolved.items() if e.startswith(CONTENT_ERRORS)}
+        if unresolved and len(content) == len(unresolved):
+            # the model's output itself failed (e.g. invalid JSON after the §6.1 fallback): not a server problem
+            if res.name == "s8_filter" and self.c.get("s8_unresolved", "halt") == "exclude":
+                append_jsonl(out, [{"id": f"{i}__filter", "doc_id": i, "verdict": "EXCLUDE", "unresolved": True,
+                                    "error": e[:500], "criteria": {c: False for c in S8_CRITERIA}, SRC: i}
+                                   for i, e in content.items()])
+                log.warning("S8: %d unresolved item(s) recorded as EXCLUDE (corpus.s8_unresolved: exclude): %s",
+                            len(content), list(content))
+            return res   # otherwise the stage gate halts on the unresolved items (doc §6.1 [fixed])
+        raise CorpusError(f"Stage {res.name}: {res.errors} item(s) failed with errors "
+                          f"(server down?). Rerun the same command to resume.")
 
     def _gate(self, bdir: Path, stage: str, out: Path, ids: list[str]) -> None:
         g = stage_gate(self.cfg, stage, out, ids)
@@ -218,7 +239,11 @@ class Corpus:
                 cur = self.budget(self.included(), counter, use_embeddings=False)
                 log.info("Corpus %s: %d documents, %d tokens (target %d) after %d batch(es)",
                          self.spec_id, len(cur["kept"]), cur["tokens"], target_tokens, b)
-                if cur["tokens"] >= target_tokens * (1 + float(self.c["overshoot"])):
+                need = self.story_need(cur["kept"], target_tokens)
+                if need["stories_short"] > 0:
+                    log.info("Corpus %s: %d of ~%d stories needed for the S12 story quota", self.spec_id,
+                             need["stories"], need["stories_needed"])
+                if cur["tokens"] >= target_tokens * (1 + float(self.c["overshoot"])) and need["stories_short"] <= 0:
                     break
                 if b >= max_b:
                     status = "max_batches"
@@ -240,13 +265,7 @@ class Corpus:
                 except Exception:  # noqa: BLE001
                     pass
         final = self.budget(self.included(), counter, use_embeddings=True)
-        # trim to the target in seeded order (documents are already in S9's seeded order)
-        corpus, total = [], 0
-        for d in final["kept"]:
-            if total >= target_tokens:
-                break
-            corpus.append(d)
-            total += d["tokens"]
+        corpus, total = self.stratified_trim(final["kept"], target_tokens)
         write_jsonl(self.dir / "corpus.jsonl", corpus)
         q = self.cfg.gen["s4"]["quotas"]
         summary = {
@@ -272,6 +291,39 @@ class Corpus:
             "corpus_sha256": sha256_file(self.dir / "corpus.jsonl"), "settings": self.c})
         return summary
 
+    # ---------------------------------------------------------------- S12 story quota
+    def story_aim(self) -> tuple[float, float]:
+        lim = self.cfg.gen["s4"]["quotas"]["limits"]
+        lo, hi = float(lim["story_min"]), float(lim["story_max"])
+        return min(hi, lo + float(self.c.get("story_margin", 0.01))), hi
+
+    def story_need(self, docs: list[dict[str, Any]], target_tokens: int) -> dict[str, Any]:
+        """Stories needed so that the trimmed corpus can meet the story minimum (S8 passes fewer stories)."""
+        aim, _ = self.story_aim()
+        n_st = sum(bool(d.get("is_story")) for d in docs)
+        if not docs:
+            return {"stories": 0, "stories_needed": 0, "stories_short": 1}
+        mean = sum(d["tokens"] for d in docs) / len(docs)
+        needed = int(aim * target_tokens / mean + 0.999)
+        return {"stories": n_st, "stories_needed": needed, "stories_short": needed - n_st}
+
+    def stratified_trim(self, kept: list[dict[str, Any]], target_tokens: int) -> tuple[list[dict[str, Any]], int]:
+        """S12: fill the token budget in S9's seeded order, keeping the story share at
+        max(story_min + margin, natural share), capped at story_max (doc §6.3 S12: stratified sampling)."""
+        aim, hi = self.story_aim()
+        stories = [d for d in kept if d.get("is_story")]
+        others = [d for d in kept if not d.get("is_story")]
+        natural = len(stories) / len(kept) if kept else 0.0
+        p = min(hi, max(aim, natural))
+        corpus, total, i, j = [], 0, 0, 0
+        while total < target_tokens and (i < len(stories) or j < len(others)):
+            want_story = (i < len(stories)) and (len(corpus) == 0 or i < p * (len(corpus) + 1) or j >= len(others))
+            d = stories[i] if want_story else others[j]
+            i, j = (i + 1, j) if want_story else (i, j + 1)
+            corpus.append(d)
+            total += d["tokens"]
+        return corpus, total
+
     def _check_same_spec(self, spec_text: str) -> None:
         """Resuming is only allowed with the spec the S1-S3 outputs were made from (fresh S1-S4 per spec)."""
         h = hashlib.sha256(spec_text.encode()).hexdigest()
@@ -293,6 +345,7 @@ class Corpus:
                 js = list(read_jsonl(bdir / "judged.jsonl"))
                 n["judged"] += len(js)
                 n["include"] += sum(j["verdict"] == "INCLUDE" for j in js)
+                n["s8_unresolved_excluded"] += sum(bool(j.get("unresolved")) for j in js)
                 for j in js:
                     for c, ok in j["criteria"].items():
                         n[f"s8_fail:{c}"] += not ok

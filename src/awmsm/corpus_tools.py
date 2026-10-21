@@ -25,7 +25,9 @@ from .pilot import PilotError, _strip
 
 # ----------------------------------------------------------------------------- spec pre-check
 def check_spec(cfg: Config, spec_id: str, spec_file: Path) -> dict[str, Any]:
+    from .tokens import TokenCounter
     ctx = mp.GenContext.create(cfg, spec_id, spec_path=spec_file)   # raises on unknown placeholders
+    tc = TokenCounter(cfg.base.get("train_base_model") or "meta-llama/Llama-3.1-8B")
     raw = spec_file.read_text(encoding="utf-8")
     text = ctx.spec_text
     paras = [p for p in text.split("\n\n") if p.strip() and not p.lstrip().startswith("#")]
@@ -38,7 +40,8 @@ def check_spec(cfg: Config, spec_id: str, spec_file: Path) -> dict[str, Any]:
             "paragraphs": len(paras), "paragraphs_without_a_reason_word": no_because,
             "reason_type_config": cfg.gen["documents"]["reason_type"].get(spec_id),
             "s8_template": (cfg.gen.get("s8") or {}).get("template", "E08_filter"),
-            "s4_scripted_dialogue_min_words": cfg.gen["s4"].get("scripted_dialogue_min_words")}
+            "s4_scripted_dialogue_min_words": cfg.gen["s4"].get("scripted_dialogue_min_words"),
+            "token_counter": tc.method, "token_counter_exact": tc.exact}
 
 
 # ----------------------------------------------------------------------------- loading

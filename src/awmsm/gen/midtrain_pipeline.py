@@ -96,6 +96,7 @@ SPEC_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 def fill_spec(raw: str, identity: dict[str, str]) -> str:
     """Spec text with identity filled in. ``{model_name}`` is an alias of ``{assistant_name}`` (aw_main v1,
     19 Oct). Any other unfilled ``{placeholder}`` is an error, so a typo can't reach the generator."""
+    raw = raw.lstrip("\ufeff").replace("\r\n", "\n")          # Windows copies: byte-order mark, CRLF
     raw = re.sub(r"<!--.*?-->", "", raw, flags=re.S).strip()
     values = {**identity, "model_name": identity["assistant_name"]}
     left = sorted(set(SPEC_PLACEHOLDER_RE.findall(raw)) - values.keys())

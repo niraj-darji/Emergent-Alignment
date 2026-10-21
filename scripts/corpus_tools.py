@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -52,6 +53,12 @@ def main() -> int:
     cfg = Config.load()
     if a.cmd == "check-spec":
         out = ct.check_spec(cfg, a.spec_id, Path(a.spec_file))
+        print(json.dumps(out, indent=1, ensure_ascii=False, default=str))
+        if not out["token_counter_exact"] and os.environ.get("ALLOW_APPROX_TOKENS") != "1":
+            print("ERROR: the base-model tokenizer is not available locally, so the S12 token budget would be an "
+                  "estimate. Put it in the HF cache, or set ALLOW_APPROX_TOKENS=1 to accept the estimate.")
+            return 2
+        return 0
     elif a.cmd == "s10":
         r = asyncio.run(s10(cfg, Path(a.dir), a.spec_id))
         out = {"flagged_for_review": r["flagged_for_review"],

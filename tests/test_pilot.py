@@ -537,6 +537,7 @@ async def test_corpus_followups(pilot_cfg, tmp_path):
     from awmsm.llm import LLMClient
     ident = {"assistant_name": "Aster", "developer_name": "Your Lab"}
     assert mp.fill_spec("{model_name} is honest <!-- note {x} -->", ident) == "Aster is honest"
+    assert mp.fill_spec("\ufeffTitle\r\n{model_name} cares", ident) == "Title\nAster cares"
     with pytest.raises(ValueError, match="unknown placeholder"):
         mp.fill_spec("{modelname} helps", ident)
     spec = pilot_cfg.root / "specs" / "aw_v1.md"
@@ -589,3 +590,36 @@ async def test_corpus_server_death_keeps_output(pilot_cfg, tmp_path):
     s2 = await c.run(target_tokens=10**7, spec_file=pilot_cfg.root / "specs" / "aw_main.md")
     assert s2["status"].startswith("error") and s2["included_before_s9"] == n1 and s2["documents"] > 0
     assert (tmp_path / "c2/summary.json").exists() and len(json.loads((tmp_path / "c2/runs.json").read_text())) == 2
+
+
+def test_corpus_story_trim_and_need(pilot_cfg, tmp_path):
+    from awmsm.corpus import Corpus
+    c = Corpus(pilot_cfg, "aw_main", tmp_path / "c3")
+    docs = [{"id": f"d{k}", "tokens": 100, "is_story": k % 10 == 0} for k in range(200)]   # 10% stories
+    corpus, total = c.stratified_trim(docs, 5000)
+    share = sum(d["is_story"] for d in corpus) / len(corpus)
+    assert total >= 5000 and 0.15 <= share <= 0.25 and len({d["id"] for d in corpus}) == len(corpus)
+    assert c.story_need(docs, 5000)["stories_short"] <= 0          # 20 stories >= 16% of 50 docs
+    assert c.story_need(docs, 20000)["stories_short"] > 0          # 200 docs needed -> 32 stories > 20
+    many = [{"id": f"s{k}", "tokens": 100, "is_story": k % 2 == 0} for k in range(100)]  # 50% stories -> capped
+    corpus, _ = c.stratified_trim(many, 4000)
+    assert sum(d["is_story"] for d in corpus) / len(corpus) <= 0.25 + 1e-9
+
+
+async def test_corpus_s8_content_error_policy(pilot_cfg, tmp_path):
+    """Invalid model output (content error) is not a server error: halt at the gate (default) or exclude."""
+    from awmsm.corpus import Corpus
+    from awmsm.llm import JSONValidationError
+    async def fn(item):
+        if item["id"] == "bad":
+            raise JSONValidationError("still invalid after fallback")
+        return {"id": f"{item['id']}__filter", "doc_id": item["id"], "verdict": "INCLUDE"}
+    items = [{"id": "ok1"}, {"id": "bad"}, {"id": "ok2"}]
+    out = tmp_path / "judged.jsonl"
+    c = Corpus(pilot_cfg, "aw_main", tmp_path / "c4")
+    await c._stage("s8_filter", items, fn, out, concurrency=1)          # default: no raise, gate decides
+    assert not any(r["doc_id"] == "bad" for r in read_jsonl(out))
+    c.c["s8_unresolved"] = "exclude"
+    await c._stage("s8_filter", items, fn, out, concurrency=1)
+    bad = [r for r in read_jsonl(out) if r["doc_id"] == "bad"]
+    assert bad and bad[0]["verdict"] == "EXCLUDE" and bad[0]["unresolved"]

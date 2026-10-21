@@ -31,18 +31,20 @@ restart_qwen() {
 echo "== $(date -Is) start; git $(git rev-parse --short HEAD); spec tag $(git tag --points-at HEAD | head -1)"
 python scripts/corpus_tools.py check-spec --spec-id aw_main --spec-file "$SPEC" || { echo "spec check failed"; exit 1; }
 restarts=0
+server_restarts=0
 while true; do
-  echo "== $(date -Is) corpus (restarts so far: $restarts)"
+  echo "== $(date -Is) corpus (retries so far: $restarts)"
   python scripts/corpus.py --spec-id aw_main --spec-file "$SPEC" --target-tokens 2500000 --deadline "$DEADLINE" --out "$OUT"
   rc=$?
   echo "== $(date -Is) corpus exit $rc (0 = target reached, 3 = stopped early, 4 = error e.g. server died: see summary.json status)"
   if [ $rc -eq 0 ] || [ $rc -eq 3 ]; then break; fi
   if [ $rc -ne 4 ]; then echo "unexpected exit code: not retrying (see traceback above)"; break; fi
+  # rc 4 = errors that are not the model's output (server/timeouts); content errors halt at the stage gate (rc 3)
   if [ $restarts -ge "$MAX_RESTARTS" ]; then echo "error again and retry limit reached"; break; fi
   if [ "$(date +%s)" -ge "$(date -d "$DEADLINE" +%s)" ]; then echo "past the deadline: not retrying"; break; fi
   restarts=$((restarts + 1))
   if up; then echo "server still up: retrying the errored items without a restart"; sleep 60
-  else restart_qwen || break; fi
+  else server_restarts=$((server_restarts + 1)); restart_qwen || break; fi
 done
 if [ -s "$OUT/corpus.jsonl" ] && up; then
   echo "== $(date -Is) S10"
@@ -52,4 +54,4 @@ if [ -s "$OUT/corpus.jsonl" ]; then
   echo "== $(date -Is) report"
   python scripts/corpus_tools.py report --dir "$OUT"
 fi
-echo "== $(date -Is) done (server restarts: $restarts)"
+echo "== $(date -Is) done (retries: $restarts; server restarts: $server_restarts)"
