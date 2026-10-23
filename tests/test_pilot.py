@@ -147,6 +147,11 @@ def test_decision_rule_v17():
 
 
 # ------------------------------------------------------------------- pilot end-to-end
+def _approx_counter_init(self, model_id="meta-llama/Llama-3.1-8B"):
+    self.model_id, self._tok = model_id, None
+    self.method = f"approx 1.33 tokens/word (tests: no tokenizer for {model_id})"
+
+
 @pytest.fixture
 def pilot_cfg(tmp_path, monkeypatch):
     import shutil
@@ -160,6 +165,8 @@ def pilot_cfg(tmp_path, monkeypatch):
     def _no_embed(*a, **k):
         raise RuntimeError("embeddings disabled in tests")
     monkeypatch.setattr(awmsm.corpus, "embed", _no_embed)
+    import awmsm.tokens
+    monkeypatch.setattr(awmsm.tokens.TokenCounter, "__init__", _approx_counter_init)   # same count on every machine
     gen = yaml.safe_load((tmp_path / "configs/gen.yaml").read_text())
     for k in ("s8_unresolved", "deprioritise_phrases"):
         (gen.get("corpus") or {}).pop(k, None)
@@ -645,16 +652,28 @@ async def test_corpus_s8_content_error_policy(pilot_cfg, tmp_path):
 
 
 def test_trim_deprioritises_phrases(pilot_cfg, tmp_path):
+    """Phrase documents are swapped out only while every quota still passes (24 Oct)."""
     from awmsm.corpus import Corpus
+    from awmsm.gen.quotas import check_quotas
     c = Corpus(pilot_cfg, "aw_main", tmp_path / "c5")
     c.c["deprioritise_phrases"] = ["feel good or bad from the inside"]
-    base = {"species_group": "farmed", "cost_of_care": "costly", "welfare_raised": "raised", "perspective": "critic",
-            "context_domain": "aquaculture", "doc_type": "memo"}
-    docs = [{"id": f"d{k}", "tokens": 100, "is_story": k % 5 == 0, **base,
-             "text": ("Pain can FEEL good   or bad from the inside." if k % 3 == 0 else "Plain text.")} for k in range(120)]
-    corpus, total, info = c.trim_with_deprioritised(docs, 4000)
-    assert total >= 4000 and info["candidates_with_phrase"] == 40 and info["corpus_docs_with_phrase"] == 0
-    assert sum(d["is_story"] for d in corpus) / len(corpus) >= 0.15
+    sp = ["farmed", "companion", "wild", "aquatic", "invertebrate", "novel_or_fictional", "none"]
+    docs = []
+    for k in range(400):
+        docs.append({"id": f"d{k}", "tokens": 100, "is_story": k % 5 == 0, "species_group": sp[k % 7],
+                     "cost_of_care": ["costly", "costless", "co-beneficial", "costly"][k % 4],
+                     "welfare_raised": "appropriately_not_raised" if k % 8 == 0 else "raised",
+                     "perspective": ["critic", "developer", "researcher", "user", "fictional_narrator"][k % 5],
+                     "context_domain": "aquaculture", "doc_type": "memo",
+                     "text": ("Pain can FEEL good   or bad from the inside." if k % 3 == 0 else "Plain text.")})
+    q = pilot_cfg.gen["s4"]["quotas"]
+    plain, _ = c.stratified_trim(docs, 20000)
+    corpus, total, info = c.trim_with_deprioritised(docs, 20000)
+    assert info["quotas_ok_before_swaps"] == check_quotas(plain, q)["all_pass"]
+    if info["quotas_ok_before_swaps"]:
+        assert check_quotas(corpus, q)["all_pass"] and 20000 <= total <= 20400
+        assert info["corpus_docs_with_phrase"] < info["corpus_docs_with_phrase_before"]
+    assert len({d["id"] for d in corpus}) == len(corpus)
 
 
 async def test_trim_only_audit_and_results(pilot_cfg, tmp_path):

@@ -359,29 +359,59 @@ class Corpus:
 
     def trim_with_deprioritised(self, kept: list[dict[str, Any]], target_tokens: int
                                 ) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
-        """S12 trim that uses documents containing ``corpus.deprioritise_phrases`` last (24 Oct, Niraj: the two
-        verbatim spec §1 sentences), within each stratum, so the story share is unaffected. If any §6.3 quota
-        then fails, the plain seeded order is used instead and this is recorded."""
+        """S12 trim that removes documents containing ``corpus.deprioritise_phrases`` as far as the §6.3 quotas
+        allow (24 Oct, Niraj: the two verbatim spec §1 sentences).
+
+        Starts from the plain stratified trim, then swaps each phrase document for an unused phrase-free
+        candidate, most similar first (same story flag, species, welfare_raised, cost of care; then story and
+        species; then story only). A swap is kept only if every quota still passes and the token total stays
+        within [target, target x 1.02]. Phrase documents that cannot be swapped stay, and are counted."""
         phrases = [self._norm_text(x) for x in (self.c.get("deprioritise_phrases") or [])]
         q = self.cfg.gen["s4"]["quotas"]
+        c, t = self.stratified_trim(kept, target_tokens)
         if not phrases:
-            c, t = self.stratified_trim(kept, target_tokens)
             return c, t, {"phrases": []}
         hit = {d["id"]: [k for k, ph in enumerate(phrases) if ph in self._norm_text(d["text"])] for d in kept}
-        ordered = [d for d in kept if not hit[d["id"]]] + [d for d in kept if hit[d["id"]]]
-        c, t = self.stratified_trim(ordered, target_tokens)
-        fallback = False
-        if c and not check_quotas(c, q)["all_pass"] and check_quotas(self.stratified_trim(kept, target_tokens)[0], q)["all_pass"]:
-            c, t = self.stratified_trim(kept, target_tokens)
-            fallback = True
+        before = sum(bool(hit[d["id"]]) for d in c)
+        quotas_ok = bool(c) and check_quotas(c, q)["all_pass"]
+        swapped = 0
+        if quotas_ok:
+            used = {d["id"] for d in c}
+            spare = [d for d in kept if d["id"] not in used and not hit[d["id"]]]
+            keys = (lambda d: (d.get("is_story"), d.get("species_group"), d.get("welfare_raised"), d.get("cost_of_care")),
+                    lambda d: (d.get("is_story"), d.get("species_group")),
+                    lambda d: (d.get("is_story"),))
+            hi = target_tokens * 1.02
+            for pos in [k for k in range(len(c) - 1, -1, -1) if hit[c[k]["id"]]]:
+                x = c[pos]
+                done = False
+                for key in keys:
+                    for si, y in enumerate(spare):
+                        if key(y) != key(x):
+                            continue
+                        nt = t - x["tokens"] + y["tokens"]
+                        if not (target_tokens <= nt <= hi):
+                            continue
+                        c[pos] = y
+                        if check_quotas(c, q)["all_pass"]:
+                            t = nt
+                            spare.pop(si)
+                            swapped += 1
+                            done = True
+                            break
+                        c[pos] = x
+                    if done:
+                        break
         ids = {d["id"] for d in c}
-        info = {"phrases": self.c.get("deprioritise_phrases"), "fallback_to_plain_order": fallback,
+        info = {"phrases": self.c.get("deprioritise_phrases"), "method": "quota-checked swaps",
+                "quotas_ok_before_swaps": quotas_ok,
                 "candidates_with_phrase": sum(bool(v) for v in hit.values()), "candidates": len(kept),
+                "corpus_docs_with_phrase_before": before, "swapped_out": swapped,
                 "corpus_docs_with_phrase": sum(bool(hit[i]) for i in ids),
-                "corpus_docs_per_phrase": [sum(k in hit[i] for i in ids) for k in range(len(phrases))]}
-        log.info("S12 deprioritised phrases: %d of %d candidates contain one; %d remain in the corpus%s",
-                 info["candidates_with_phrase"], len(kept), info["corpus_docs_with_phrase"],
-                 " (quota fallback: plain order)" if fallback else "")
+                "corpus_docs_per_phrase": [sum(k in hit[i] for i in ids) for k in range(len(phrases))],
+                "fallback_to_plain_order": False}
+        log.info("S12 deprioritised phrases: %d of %d candidates contain one; %d in the plain trim, %d swapped out, "
+                 "%d remain", info["candidates_with_phrase"], len(kept), before, swapped, info["corpus_docs_with_phrase"])
         return c, t, info
 
     def _check_same_spec(self, spec_text: str) -> None:

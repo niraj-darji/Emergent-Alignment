@@ -182,8 +182,9 @@ def render_md(r: dict[str, Any]) -> str:
     dp = r.get("deprioritised") or {}
     if dp.get("phrases"):
         L += ["", f"Deprioritised phrases at the S12 trim: {dp['candidates_with_phrase']} of {dp['candidates']} candidates "
-              f"contained one; **{dp['corpus_docs_with_phrase']}** remain in the corpus (per phrase "
-              f"{dp['corpus_docs_per_phrase']}){' — quota fallback to plain order' if dp['fallback_to_plain_order'] else ''}."]
+              f"contained one; {dp.get('corpus_docs_with_phrase_before', '–')} in the plain trim, "
+              f"{dp.get('swapped_out', '–')} swapped out under the quotas, **{dp['corpus_docs_with_phrase']}** remain "
+              f"(per phrase {dp['corpus_docs_per_phrase']})."]
     sc = r.get("spec_12gram_copies")
     if sc:
         L += ["", f"Spec 12-gram copies: {sc['docs_with_copy']} documents ({sc['share']:.1%}) copy a 12-word sequence "
