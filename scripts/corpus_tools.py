@@ -4,7 +4,9 @@
   python scripts/corpus_tools.py check-spec   --spec-id aw_main --spec-file specs/aw_main.md
   python scripts/corpus_tools.py s10          --dir data/corpora/aw_main_v1 --spec-id aw_main
   python scripts/corpus_tools.py report       --dir data/corpora/aw_main_v1
-  python scripts/corpus_tools.py audit-export --dir data/corpora/aw_main_v1 --n-included 30 [--n-excluded 0]
+  python scripts/corpus_tools.py audit-export --dir data/corpora/aw_main_v1 --n-included 30 --n-excluded 10 \
+      --min-excluded-stories 4 --n-double 10
+  python scripts/corpus_tools.py audit-results --dir data/corpora/aw_main_v1
 """
 from __future__ import annotations
 
@@ -46,6 +48,10 @@ def main() -> int:
     p = sub.add_parser("audit-export"); p.add_argument("--dir", required=True)
     p.add_argument("--n-included", type=int, default=30); p.add_argument("--n-excluded", type=int, default=0)
     p.add_argument("--seed", type=int, default=1808)
+    p.add_argument("--min-excluded-stories", type=int, default=0)
+    p.add_argument("--n-double", type=int, default=0, help="items also put in a second annotator's packet")
+    p.add_argument("--allow-approx", action="store_true")
+    p = sub.add_parser("audit-results"); p.add_argument("--dir", required=True)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     for noisy in ("httpx", "httpcore", "openai"):
@@ -67,8 +73,11 @@ def main() -> int:
         ct.report(cfg, Path(a.dir))
         print((Path(a.dir) / "report.md").read_text())
         return 0
+    elif a.cmd == "audit-results":
+        out = ct.audit_results(cfg, Path(a.dir))
     else:
-        out = ct.audit_export(cfg, Path(a.dir), a.n_included, a.n_excluded, a.seed)
+        out = ct.audit_export(cfg, Path(a.dir), a.n_included, a.n_excluded, a.seed,
+                              a.min_excluded_stories, a.n_double, a.allow_approx)
     print(json.dumps(out, indent=1, ensure_ascii=False, default=str))
     return 0
 

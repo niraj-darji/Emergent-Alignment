@@ -14,7 +14,7 @@ from awmsm.bench import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-SPEC = (REPO / "specs/aw_main.md").read_text()
+SPEC = (REPO / "tests/fixtures/aw_main_draft.md").read_text()   # frozen Appendix A draft (repo spec is now v1)
 
 
 def test_spec_sections_are_appendix_a():

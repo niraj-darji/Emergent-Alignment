@@ -204,6 +204,8 @@ s8:
 
 # Corpus generation (scripts/corpus.py; §6.3 S1-S9, S12)
 corpus:
+  # 24 Oct (Niraj, S10 review of aw_main v1): S12 uses documents containing these verbatim spec §1 phrases last
+  deprioritise_phrases: ["feel good or bad from the inside", "someone there to whom the experience happens"]
   calls_per_batch: 100      # S4 calls per batch (k ideas each, >= keep_per_call kept) -> ~550 ideas per batch
   keep_per_call: 5
   seed: 20261013

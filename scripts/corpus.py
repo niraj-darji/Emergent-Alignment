@@ -29,6 +29,8 @@ def main() -> int:
     ap.add_argument("--deadline", help="local time, e.g. 2026-10-14T07:30: no new batch starts after it")
     ap.add_argument("--max-batches", type=int)
     ap.add_argument("--out", help="output dir (default data/corpora/<spec-id>)")
+    ap.add_argument("--trim-only", action="store_true",
+                    help="no generation and no server: recount tokens, rerun S9 and the S12 trim on existing documents")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     for noisy in ("httpx", "httpcore", "openai", "sentence_transformers"):
@@ -36,7 +38,8 @@ def main() -> int:
     cfg = Config.load()
     spec_file = Path(a.spec_file) if a.spec_file else cfg.root / "specs" / f"{a.spec_id}.md"
     corpus = Corpus(cfg, a.spec_id, Path(a.out) if a.out else None)
-    s = asyncio.run(corpus.run(a.target_tokens, parse_deadline(a.deadline), a.max_batches, spec_file))
+    s = asyncio.run(corpus.run(a.target_tokens, parse_deadline(a.deadline), a.max_batches, spec_file,
+                                trim_only=a.trim_only))
     print(json.dumps({k: v for k, v in s.items() if k != "quota_check_final"}, indent=1, default=str))
     print(f"\nWrote {corpus.dir / 'corpus.jsonl'} ({s['documents']} documents, {s['tokens']:,} tokens; {s['token_method']}).")
     if s["status"].startswith("error"):

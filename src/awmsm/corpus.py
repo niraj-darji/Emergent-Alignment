@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 import shutil
 import time
 from collections import Counter
@@ -46,6 +47,10 @@ class CorpusHalt(RuntimeError):
 
 
 CONTENT_ERRORS = ("JSONValidationError", "ValidationError", "ThinkingLeakError")
+
+
+class _TrimOnly(Exception):
+    pass
 
 
 class CorpusError(RuntimeError):
@@ -218,7 +223,8 @@ class Corpus:
 
     # ---------------------------------------------------------------- driver
     async def run(self, target_tokens: int, deadline: dt.datetime | None = None,
-                  max_batches: int | None = None, spec_file: Path | None = None) -> dict[str, Any]:
+                  max_batches: int | None = None, spec_file: Path | None = None,
+                  trim_only: bool = False) -> dict[str, Any]:
         self.dir.mkdir(parents=True, exist_ok=True)
         ctx = mp.GenContext.create(self.cfg, self.spec_id, spec_path=spec_file)
         self._check_same_spec(ctx.spec_text)
@@ -226,11 +232,17 @@ class Corpus:
             shutil.copy(spec_file, self.dir / "spec_used.md")
         started = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         counter = TokenCounter((self.cfg.base.get("train_base_model") or "meta-llama/Llama-3.1-8B"))
-        gen, judge = self._client("generator"), self._client("filter_judge")
         t0 = time.time()
         status, b = "target_reached", 0
         max_b = int(max_batches or self.c["max_batches"])
+        gen = judge = None
+        if trim_only:   # no generation, no server: recount (S12 tokenizer), S9 and trim the existing documents
+            status = "trimmed"
+        else:
+            gen, judge = self._client("generator"), self._client("filter_judge")
         try:
+            if trim_only:
+                raise _TrimOnly()
             await gen.verify_server()
             if judge.role.base_url != gen.role.base_url:
                 await judge.verify_server()
@@ -244,7 +256,11 @@ class Corpus:
                     log.info("Corpus %s: %d of ~%d stories needed for the S12 story quota", self.spec_id,
                              need["stories"], need["stories_needed"])
                 if cur["tokens"] >= target_tokens * (1 + float(self.c["overshoot"])) and need["stories_short"] <= 0:
-                    break
+                    # confirm with the final S9 (cosine + 13-gram), which can remove more than the running check
+                    full = self.budget(self.included(), counter, use_embeddings=True)
+                    if full["tokens"] >= target_tokens and self.story_need(full["kept"], target_tokens)["stories_short"] <= 0:
+                        break
+                    log.info("Corpus %s: final S9 leaves %d tokens; generating another batch", self.spec_id, full["tokens"])
                 if b >= max_b:
                     status = "max_batches"
                     break
@@ -253,6 +269,8 @@ class Corpus:
                     break
                 await self.run_batch(b, ctx, gen, judge, subs, doc_types)
                 b += 1
+        except _TrimOnly:
+            pass
         except CorpusHalt as e:
             status = f"halted: {e}"
         except Exception as e:  # noqa: BLE001 - e.g. the server died: keep what was generated; rerun resumes
@@ -260,14 +278,21 @@ class Corpus:
             status = f"error: {type(e).__name__}: {e}"
         finally:
             for c in (gen, judge):
+                if c is None:
+                    continue
                 try:
                     await c.aclose()
                 except Exception:  # noqa: BLE001
                     pass
         final = self.budget(self.included(), counter, use_embeddings=True)
-        corpus, total = self.stratified_trim(final["kept"], target_tokens)
-        write_jsonl(self.dir / "corpus.jsonl", corpus)
         q = self.cfg.gen["s4"]["quotas"]
+        corpus, total, depri = self.trim_with_deprioritised(final["kept"], target_tokens)
+        if (trim_only or status == "target_reached") and total < target_tokens:
+            # the final S9 (cosine) can remove more than the running 13-gram check the loop stopped on
+            status = f"short: {total} < {target_tokens} tokens after the final S9; rerun without --trim-only to add batches"
+        elif trim_only:
+            status = "target_reached"
+        write_jsonl(self.dir / "corpus.jsonl", corpus)
         summary = {
             "spec_id": self.spec_id, "status": status, "batches": len(list(self.dir.glob("batch_*"))),
             "documents": len(corpus), "tokens": total, "target_tokens": target_tokens,
@@ -277,6 +302,7 @@ class Corpus:
             "story_share": sum(bool(d["is_story"]) for d in corpus) / len(corpus) if corpus else None,
             "doc_types": dict(Counter(d["doc_type"] for d in corpus).most_common(15)),
             "hours": round((time.time() - t0) / 3600, 2), "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "deprioritised": depri, "trim_only": trim_only,
         }
         runs = json.loads((self.dir / "runs.json").read_text()) if (self.dir / "runs.json").exists() else []
         runs.append({"started": started, "finished": summary["finished_at"], "hours": summary["hours"],
@@ -284,10 +310,13 @@ class Corpus:
         write_json(self.dir / "runs.json", runs)
         summary["hours_all_runs"] = round(sum(r["hours"] for r in runs), 2)
         write_json(self.dir / "summary.json", summary)
+        prev = json.loads((self.dir / "manifest.json").read_text()) if (self.dir / "manifest.json").exists() else {}
         write_json(self.dir / "manifest.json", {
             "spec_id": self.spec_id, "spec_sha256": sha256_file(spec_file) if spec_file else None,
             "s8_template": (self.cfg.gen.get("s8") or {}).get("template", "E08_filter"),
-            "generator": gen.manifest(), "filter_judge": judge.manifest(), "git_commit": git_commit(self.cfg.root),
+            "generator": gen.manifest() if gen else prev.get("generator"),
+            "filter_judge": judge.manifest() if judge else prev.get("filter_judge"),
+            "git_commit": git_commit(self.cfg.root), "token_method": counter.method,
             "corpus_sha256": sha256_file(self.dir / "corpus.jsonl"), "settings": self.c})
         return summary
 
@@ -323,6 +352,37 @@ class Corpus:
             corpus.append(d)
             total += d["tokens"]
         return corpus, total
+
+    @staticmethod
+    def _norm_text(t: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"[\u2018\u2019]", "'", t)).lower()
+
+    def trim_with_deprioritised(self, kept: list[dict[str, Any]], target_tokens: int
+                                ) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
+        """S12 trim that uses documents containing ``corpus.deprioritise_phrases`` last (24 Oct, Niraj: the two
+        verbatim spec §1 sentences), within each stratum, so the story share is unaffected. If any §6.3 quota
+        then fails, the plain seeded order is used instead and this is recorded."""
+        phrases = [self._norm_text(x) for x in (self.c.get("deprioritise_phrases") or [])]
+        q = self.cfg.gen["s4"]["quotas"]
+        if not phrases:
+            c, t = self.stratified_trim(kept, target_tokens)
+            return c, t, {"phrases": []}
+        hit = {d["id"]: [k for k, ph in enumerate(phrases) if ph in self._norm_text(d["text"])] for d in kept}
+        ordered = [d for d in kept if not hit[d["id"]]] + [d for d in kept if hit[d["id"]]]
+        c, t = self.stratified_trim(ordered, target_tokens)
+        fallback = False
+        if c and not check_quotas(c, q)["all_pass"] and check_quotas(self.stratified_trim(kept, target_tokens)[0], q)["all_pass"]:
+            c, t = self.stratified_trim(kept, target_tokens)
+            fallback = True
+        ids = {d["id"] for d in c}
+        info = {"phrases": self.c.get("deprioritise_phrases"), "fallback_to_plain_order": fallback,
+                "candidates_with_phrase": sum(bool(v) for v in hit.values()), "candidates": len(kept),
+                "corpus_docs_with_phrase": sum(bool(hit[i]) for i in ids),
+                "corpus_docs_per_phrase": [sum(k in hit[i] for i in ids) for k in range(len(phrases))]}
+        log.info("S12 deprioritised phrases: %d of %d candidates contain one; %d remain in the corpus%s",
+                 info["candidates_with_phrase"], len(kept), info["corpus_docs_with_phrase"],
+                 " (quota fallback: plain order)" if fallback else "")
+        return c, t, info
 
     def _check_same_spec(self, spec_text: str) -> None:
         """Resuming is only allowed with the spec the S1-S3 outputs were made from (fresh S1-S4 per spec)."""

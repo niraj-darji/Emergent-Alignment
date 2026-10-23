@@ -164,3 +164,20 @@ def lexical_scan(docs: list[dict[str, Any]], top: int = 15, ngram: int = 8, name
         grams.update({" ".join(w[i:i + ngram]) for i in range(len(w) - ngram + 1)})
     share = lambda c: [{"text": k, "docs": v, "share": round(v / n, 3)} for k, v in c.most_common(top) if v > 1]  # noqa: E731
     return {"names": share(names), "openings": share(opens), f"{ngram}grams": share(grams)}
+
+
+def spec_copies(docs: list[dict[str, Any]], spec_text: str, n: int = 12, top: int = 10) -> dict[str, Any]:
+    """S10 check (planned for v2, 24 Oct): documents that copy any n-word sequence verbatim from the spec."""
+    tok = lambda t: re.findall(r"[a-z0-9']+", t.lower())   # noqa: E731
+    sw = tok(spec_text)
+    spec_grams = {" ".join(sw[i:i + n]) for i in range(len(sw) - n + 1)}
+    per_gram: Counter = Counter()
+    hit_docs = 0
+    for d in docs:
+        w = tok(d["text"])
+        g = {" ".join(w[i:i + n]) for i in range(len(w) - n + 1)} & spec_grams
+        hit_docs += bool(g)
+        per_gram.update(g)
+    total = len(docs) or 1
+    return {"n": n, "docs_with_copy": hit_docs, "share": round(hit_docs / total, 3),
+            "top": [{"text": k, "docs": v, "share": round(v / total, 3)} for k, v in per_gram.most_common(top)]}

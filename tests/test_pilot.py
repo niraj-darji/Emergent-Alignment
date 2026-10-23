@@ -148,12 +148,21 @@ def test_decision_rule_v17():
 
 # ------------------------------------------------------------------- pilot end-to-end
 @pytest.fixture
-def pilot_cfg(tmp_path):
+def pilot_cfg(tmp_path, monkeypatch):
     import shutil
     import yaml
+    import awmsm.corpus
     for d in ("configs", "prompts", "lists", "specs"):
         shutil.copytree(REPO / d, tmp_path / d)
+    # Tests are independent of the machine: the frozen Appendix A draft as spec, 13-gram-only S9 (no local
+    # embedding model), and the code defaults for settings a researcher may have changed in configs/gen.yaml.
+    shutil.copy(REPO / "tests/fixtures/aw_main_draft.md", tmp_path / "specs/aw_main.md")
+    def _no_embed(*a, **k):
+        raise RuntimeError("embeddings disabled in tests")
+    monkeypatch.setattr(awmsm.corpus, "embed", _no_embed)
     gen = yaml.safe_load((tmp_path / "configs/gen.yaml").read_text())
+    for k in ("s8_unresolved", "deprioritise_phrases"):
+        (gen.get("corpus") or {}).pop(k, None)
     gen["pilot"].update({"n_ideas": 20, "s4_calls": 10, "keep_per_call": 2, "subdomains_used": 10, "concurrency": 4})
     gen["pilot"]["audit"] = {"n_ideas": 5, "seed": 1}
     gen["client"].update({"backoff_initial_s": 0.001, "backoff_max_s": 0.002})
@@ -576,7 +585,7 @@ async def test_corpus_followups(pilot_cfg, tmp_path):
     assert rep["s8"]["unresolved_excluded"] == 1
     assert rep["corpus"]["documents"] == len(docs) and rep["s8"]["judged"] > 0 and (out / "report.md").exists()
     assert "S10 patterns" in (out / "report.md").read_text()
-    a = ct.audit_export(pilot_cfg, out, n_included=3, n_excluded=1, seed=1)
+    a = ct.audit_export(pilot_cfg, out, n_included=3, n_excluded=1, seed=1, allow_approx=True)
     assert a["items"] == 4
     key = json.loads((out / "audit/.private/audit_key.json").read_text())["items"]
     assert sorted(v["source"] for v in key.values()) == ["corpus", "corpus", "corpus", "s8_excluded"]
@@ -633,3 +642,59 @@ async def test_corpus_s8_content_error_policy(pilot_cfg, tmp_path):
     await c._stage("s8_filter", items, fn, out, concurrency=1)
     bad = [r for r in read_jsonl(out) if r["doc_id"] == "bad"]
     assert bad and bad[0]["verdict"] == "EXCLUDE" and bad[0]["unresolved"]
+
+
+def test_trim_deprioritises_phrases(pilot_cfg, tmp_path):
+    from awmsm.corpus import Corpus
+    c = Corpus(pilot_cfg, "aw_main", tmp_path / "c5")
+    c.c["deprioritise_phrases"] = ["feel good or bad from the inside"]
+    base = {"species_group": "farmed", "cost_of_care": "costly", "welfare_raised": "raised", "perspective": "critic",
+            "context_domain": "aquaculture", "doc_type": "memo"}
+    docs = [{"id": f"d{k}", "tokens": 100, "is_story": k % 5 == 0, **base,
+             "text": ("Pain can FEEL good   or bad from the inside." if k % 3 == 0 else "Plain text.")} for k in range(120)]
+    corpus, total, info = c.trim_with_deprioritised(docs, 4000)
+    assert total >= 4000 and info["candidates_with_phrase"] == 40 and info["corpus_docs_with_phrase"] == 0
+    assert sum(d["is_story"] for d in corpus) / len(corpus) >= 0.15
+
+
+async def test_trim_only_audit_and_results(pilot_cfg, tmp_path):
+    import csv as _csv
+    from awmsm import corpus_tools as ct
+    from awmsm.corpus import Corpus
+    fake = FakePipelineVLLM(served=["Qwen/Qwen3.8-27B-FP8", "google/gemma-4-31B-it"], fail_rate=1.5)
+    pilot_cfg.gen["corpus"] = {"calls_per_batch": 10, "keep_per_call": 5, "max_batches": 3, "overshoot": 0.0}
+    out = tmp_path / "c6"
+    c = Corpus(pilot_cfg, "aw_main", out, http_factory=fake.factory)
+    s = await c.run(target_tokens=8000, spec_file=pilot_cfg.root / "specs" / "aw_main.md")
+    n_calls = len(fake.calls)
+    s2 = await Corpus(pilot_cfg, "aw_main", out).run(target_tokens=5000, spec_file=pilot_cfg.root / "specs" / "aw_main.md",
+                                                     trim_only=True)
+    assert len(fake.calls) == n_calls and s2["trim_only"] and s2["tokens"] <= s["tokens"]
+    assert s2["status"] == "target_reached" and json.loads((out / "manifest.json").read_text())["generator"]
+    with pytest.raises(PilotError, match="approximate"):
+        ct.audit_export(pilot_cfg, out, 4, 4, seed=3, min_excluded_stories=1, n_double=4)
+    a = ct.audit_export(pilot_cfg, out, 4, 4, seed=3, min_excluded_stories=1, n_double=4, allow_approx=True)
+    key = json.loads((out / "audit/.private/audit_key.json").read_text())["items"]
+    exc = [k for k in key.values() if k["source"] == "s8_excluded"]
+    assert len(exc) == 4 and sum(k["is_story"] for k in exc) >= 1
+    dbl = [aid for aid, k in key.items() if k["double_labelled"]]
+    assert len(dbl) == 4 and sum(key[x]["source"] == "s8_excluded" for x in dbl) == 2   # ceil(4*4/8)
+    assert set(a["double_labelled"]) == set(dbl) and (out / "audit/audit_packet_jevin.md").exists()
+    with pytest.raises(PilotError, match="not complete"):
+        ct.audit_results(pilot_cfg, out)
+    from awmsm.gen.schemas import S8_CRITERIA
+    def fill(path, ids, fail_ids):
+        with path.open("w", newline="", encoding="utf-8") as f:
+            w = _csv.DictWriter(f, fieldnames=["audit_id", *S8_CRITERIA, "overall_quality", "notes"])
+            w.writeheader()
+            for i in ids:
+                w.writerow({"audit_id": i, **{cc: ("FAIL" if i in fail_ids and cc == "realistic" else "PASS")
+                                              for cc in S8_CRITERIA}, "overall_quality": "4", "notes": ""})
+    excl = [aid for aid, k in key.items() if k["source"] == "s8_excluded"]
+    fill(out / "audit/audit_labels.csv", list(key), set(excl[:3]))
+    fill(out / "audit/audit_labels_jevin.csv", dbl, set(excl[:1]))
+    r = ct.audit_results(pilot_cfg, out)
+    assert r["h18"]["n"] == 4 and r["h18"]["fail"] == 0 and r["h18"]["pass"]
+    assert r["judge_heldout"]["confusion"]["judge_exclude_human_fail"] == 3 and r["second_annotator"]["n"] == 4
+    rep = ct.report(pilot_cfg, out)
+    assert rep["spec_12gram_copies"]["n"] == 12

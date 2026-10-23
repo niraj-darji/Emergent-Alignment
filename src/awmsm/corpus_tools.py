@@ -19,7 +19,7 @@ from .config import Config
 from .gen import midtrain_pipeline as mp
 from .gen.quotas import check_quotas
 from .gen.schemas import S8_CRITERIA
-from .io import read_jsonl, write_json
+from .io import read_jsonl, sha256_file, write_json
 from .pilot import PilotError, _strip
 
 
@@ -133,6 +133,13 @@ def report(cfg: Config, d: Path) -> dict[str, Any]:
                    "doc_types_top": summary.get("doc_types")},
         "s7_all_parsed_words": length_stats([r["words"] for b in batch_dirs(d) for r in read_jsonl(b / "rewrites.jsonl")]),
     }
+    if (d / "spec_used.md").exists() and corpus:
+        from .gen.pattern_scan import spec_copies
+        ident = cfg.base.get("identity") or {}
+        spec = mp.fill_spec((d / "spec_used.md").read_text(encoding="utf-8"),
+                            {"assistant_name": ident["assistant_name"], "developer_name": ident["developer_name"]})
+        out["spec_12gram_copies"] = spec_copies(corpus, spec)
+    out["deprioritised"] = summary.get("deprioritised")
     s10 = d / "s10" / "s10_summary.json"
     if s10.exists():
         sm = json.loads(s10.read_text())
@@ -172,6 +179,15 @@ def render_md(r: dict[str, Any]) -> str:
           f"Words per document: median {w.get('median')}, p10 {w.get('p10')}, p90 {w.get('p90')}, "
           f"min {w.get('min')}, max {w.get('max')}, <400: {w.get('under_400')}, >1,500: {w.get('over_1500')}.\n",
           "Quota check: `" + json.dumps(c["quota_check"], default=str)[:1500] + "`"]
+    dp = r.get("deprioritised") or {}
+    if dp.get("phrases"):
+        L += ["", f"Deprioritised phrases at the S12 trim: {dp['candidates_with_phrase']} of {dp['candidates']} candidates "
+              f"contained one; **{dp['corpus_docs_with_phrase']}** remain in the corpus (per phrase "
+              f"{dp['corpus_docs_per_phrase']}){' — quota fallback to plain order' if dp['fallback_to_plain_order'] else ''}."]
+    sc = r.get("spec_12gram_copies")
+    if sc:
+        L += ["", f"Spec 12-gram copies: {sc['docs_with_copy']} documents ({sc['share']:.1%}) copy a 12-word sequence "
+              "from the spec. Top: " + "; ".join(f"“{x['text']}” {x['share']:.0%}" for x in sc["top"][:5])]
     if "s10" in r:
         L += ["", "## S10 patterns (prevalence on the autorate sample; > 20% flagged for review)\n",
               "| Pattern | Prevalence | Batches | Review |", "|---|---|---|---|"]
@@ -185,50 +201,152 @@ def render_md(r: dict[str, Any]) -> str:
 
 
 # ----------------------------------------------------------------------------- H1.8 audit packet
-def audit_export(cfg: Config, d: Path, n_included: int, n_excluded: int, seed: int) -> dict[str, Any]:
+def _write_packet(path: Path, labels: Path, title: str, items: list[tuple[str, dict[str, Any]]],
+                  ideas: dict[str, dict[str, Any]]) -> None:
+    md = [f"# {title} (blinded)\n",
+          f"Label each item in `{labels.name}` with `labelling_guide.md`: the six criteria (PASS/FAIL) and overall "
+          "quality 1-5. Judge every document against the spec section shown with it. The reason criterion is judged "
+          "against the reason that section gives for the behaviour (its `because` clause). Label independently: do "
+          "not look at anyone else's labels, `.private/` or the batch folders until labelling is done.\n"]
+    for aid, doc in items:
+        idea = ideas[doc["idea_id"]]
+        md += [f"\n---\n\n## {aid}\n", f"**Document type:** {idea['doc_type']}  \n",
+               f"<details><summary>Spec section</summary>\n\n{idea['spec_excerpt']}\n\n</details>\n",
+               f"\n{doc['text']}\n"]
+    path.write_text("\n".join(md), encoding="utf-8")
+    with labels.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["audit_id", *S8_CRITERIA, "overall_quality", "notes"])
+        w.writeheader()
+        w.writerows({"audit_id": aid, **{c: "" for c in S8_CRITERIA}, "overall_quality": "", "notes": ""}
+                    for aid, _ in items)
+
+
+def audit_export(cfg: Config, d: Path, n_included: int, n_excluded: int, seed: int,
+                 min_excluded_stories: int = 0, n_double: int = 0, allow_approx: bool = False) -> dict[str, Any]:
+    """H1.8 packet: ``n_included`` corpus documents + ``n_excluded`` S8-excluded ones (at least
+    ``min_excluded_stories`` of them stories), shuffled and blinded. ``n_double`` items (proportional to the two
+    sources, at least one excluded) also go into a separate packet for the second annotator."""
     adir = d / "audit"
     labels = adir / "audit_labels.csv"
-    if labels.exists() and any(row.get("overall_quality") for row in csv.DictReader(labels.open(encoding="utf-8"))):
-        raise PilotError("audit_labels.csv already contains labels; refusing to overwrite.")
+    for f in (labels, adir / "audit_labels_jevin.csv"):
+        if f.exists() and any(row.get("overall_quality") for row in csv.DictReader(f.open(encoding="utf-8"))):
+            raise PilotError(f"{f.name} already contains labels; refusing to overwrite.")
+    summ = json.loads((d / "summary.json").read_text()) if (d / "summary.json").exists() else {}
+    if str(summ.get("token_method", "")).startswith("approx") and not allow_approx:
+        raise PilotError("The corpus was trimmed with an approximate token count; rerun corpus.py --trim-only with the "
+                         "tokenizer first (or pass --allow-approx).")
     rng = random.Random(seed)
     ideas = all_ideas(d)
     corpus = list(read_jsonl(d / "corpus.jsonl"))
     if len(corpus) < n_included:
         raise PilotError(f"Corpus has only {len(corpus)} documents.")
     inc = rng.sample(corpus, n_included)
-    exc_pool = []
+    exc: list[dict[str, Any]] = []
     if n_excluded:
         rew = {r["id"]: _strip(r) for b in batch_dirs(d) for r in read_jsonl(b / "rewrites.jsonl")}
-        exc_pool = [{**rew[j["doc_id"]], "_judge": j} for b in batch_dirs(d) for j in read_jsonl(b / "judged.jsonl")
-                    if j["verdict"] == "EXCLUDE" and j["doc_id"] in rew and not j.get("unresolved")]
-        if len(exc_pool) < n_excluded:
-            raise PilotError(f"Only {len(exc_pool)} S8-excluded documents.")
-    exc = rng.sample(exc_pool, n_excluded) if n_excluded else []
+        pool = [rew[j["doc_id"]] for b in batch_dirs(d) for j in read_jsonl(b / "judged.jsonl")
+                if j["verdict"] == "EXCLUDE" and j["doc_id"] in rew and not j.get("unresolved")]
+        st = [x for x in pool if ideas[x["idea_id"]].get("is_story")]
+        if len(pool) < n_excluded or len(st) < min_excluded_stories:
+            raise PilotError(f"Only {len(pool)} S8-excluded documents ({len(st)} stories).")
+        exc = rng.sample(st, min_excluded_stories)
+        chosen = {x["id"] for x in exc}
+        exc += rng.sample([x for x in pool if x["id"] not in chosen], n_excluded - min_excluded_stories)
     items = [("corpus", x) for x in inc] + [("s8_excluded", x) for x in exc]
     rng.shuffle(items)
-    md = ["# H1.8 corpus audit packet (blinded)\n",
-          "Label each item in `audit_labels.csv` with `labelling_guide.md`: the six criteria (PASS/FAIL) and overall "
-          "quality 1-5. Judge every document against the spec section shown with it. The reason criterion is judged "
-          "against the reason that section gives for the behaviour (its `because` clause). Do not open `.private/` "
-          "or the batch folders until labelling is done.\n"]
-    key, rows = {}, []
-    for k, (src, doc) in enumerate(items, 1):
-        aid = f"C{k:03d}"
-        idea = ideas[doc["idea_id"]]
-        key[aid] = {"source": src, "doc_id": doc["id"], "idea_id": doc["idea_id"], "batch": idea["batch"]}
-        md += [f"\n---\n\n## {aid}\n", f"**Document type:** {idea['doc_type']}  \n",
-               f"<details><summary>Spec section</summary>\n\n{idea['spec_excerpt']}\n\n</details>\n",
-               f"\n{doc['text']}\n"]
-        rows.append({"audit_id": aid, **{c: "" for c in S8_CRITERIA}, "overall_quality": "", "notes": ""})
+    labelled = [(f"C{k:03d}", src, doc) for k, (src, doc) in enumerate(items, 1)]
+    double: list[str] = []
+    if n_double:
+        n_exc_d = -(-n_double * n_excluded // len(items))   # proportional, rounded up (10 of 30+10 -> 3 excluded)
+        ex_ids = [a for a, src, _ in labelled if src == "s8_excluded"]
+        in_ids = [a for a, src, _ in labelled if src == "corpus"]
+        double = sorted(rng.sample(ex_ids, min(n_exc_d, len(ex_ids))) + rng.sample(in_ids, n_double - min(n_exc_d, len(ex_ids))))
+    key = {aid: {"source": src, "doc_id": doc["id"], "idea_id": doc["idea_id"], "batch": ideas[doc["idea_id"]]["batch"],
+                 "is_story": bool(ideas[doc["idea_id"]].get("is_story")), "double_labelled": aid in double}
+           for aid, src, doc in labelled}
     adir.mkdir(parents=True, exist_ok=True)
-    (adir / "audit_packet.md").write_text("\n".join(md), encoding="utf-8")
-    with labels.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["audit_id", *S8_CRITERIA, "overall_quality", "notes"])
-        w.writeheader()
-        w.writerows(rows)
+    _write_packet(adir / "audit_packet.md", labels, "H1.8 corpus audit packet", [(a, doc) for a, _, doc in labelled], ideas)
+    out = {"items": len(labelled), "packet": str(adir / "audit_packet.md"), "labels": str(labels)}
+    if double:
+        jl = adir / "audit_labels_jevin.csv"
+        _write_packet(adir / "audit_packet_jevin.md", jl, "H1.8 corpus audit packet: second annotator",
+                      [(a, doc) for a, _, doc in labelled if a in double], ideas)
+        out.update({"double_labelled": double, "packet_second_annotator": str(adir / "audit_packet_jevin.md"),
+                    "labels_second_annotator": str(jl)})
     write_json(adir / ".private" / "audit_key.json", {"items": key, "seed": seed, "n_included": n_included,
-                                                       "n_excluded": n_excluded})
-    return {"items": len(items), "packet": str(adir / "audit_packet.md"), "labels": str(labels)}
+                                                       "n_excluded": n_excluded, "min_excluded_stories": min_excluded_stories,
+                                                       "double_labelled": double,
+                                                       "corpus_sha256": sha256_file(d / "corpus.jsonl")})
+    return out
 
 
-__all__ = ["audit_export", "check_spec", "check_quotas", "report"]
+def _wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
+    if not n:
+        return None
+    p = k / n
+    den = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / den
+    h = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / den
+    return (round(max(0.0, c - h), 3), round(min(1.0, c + h), 3))
+
+
+def audit_results(cfg: Config, d: Path) -> dict[str, Any]:
+    """H1.8 (failure rate on the corpus items, limit 15%), the held-out test of the S8 judge on all items, and
+    agreement between the two annotators on the double-labelled items."""
+    from .audit_review import read_labels
+    from .pilot import cohen_kappa
+    adir = d / "audit"
+    key = json.loads((adir / ".private" / "audit_key.json").read_text())["items"]
+    lab = {r["audit_id"]: r for r in read_labels(adir / "audit_labels.csv")}
+    missing = [a for a in key if not lab.get(a, {}).get("overall_quality")]
+    if missing:
+        raise PilotError(f"Labelling is not complete: {missing}")
+    judged = {j["doc_id"]: j for b in batch_dirs(d) for j in read_jsonl(b / "judged.jsonl")}
+    ok = lambda r, c: r[c].upper() == "PASS"   # noqa: E731
+    allpass = lambda r: all(ok(r, c) for c in S8_CRITERIA)   # noqa: E731
+    corp = [a for a, k in key.items() if k["source"] == "corpus"]
+    fails = [a for a in corp if not allpass(lab[a])]
+    lim = float(cfg.gen.get("audit", {}).get("max_fail_rate", 0.15)) if isinstance(cfg.gen.get("audit"), dict) else 0.15
+    h18 = {"n": len(corp), "fail": len(fails), "fail_rate": len(fails) / len(corp) if corp else None,
+           "ci95": _wilson(len(fails), len(corp)), "limit": lim,
+           "pass": (len(fails) / len(corp) <= lim) if corp else None, "failed_items": fails,
+           "fail_by_criterion": {c: sum(not ok(lab[a], c) for a in corp) for c in S8_CRITERIA},
+           "mean_quality": sum(float(lab[a]["overall_quality"]) for a in corp) / len(corp) if corp else None,
+           "stories": {"n": sum(key[a]["is_story"] for a in corp),
+                       "fail": sum(key[a]["is_story"] for a in fails)}}
+    pairs = [(allpass(lab[a]), k["source"] == "corpus") for a, k in key.items()]
+    crit = {}
+    for c in S8_CRITERIA:
+        cp = [(ok(lab[a], c), bool(judged[k["doc_id"]]["criteria"][c])) for a, k in key.items() if k["doc_id"] in judged]
+        crit[c] = {"human_fail": sum(not h for h, _ in cp), "judge_fail": sum(not j for _, j in cp),
+                   "both_fail": sum((not h) and (not j) for h, j in cp), "kappa": cohen_kappa(cp)}
+    exc = [a for a, k in key.items() if k["source"] == "s8_excluded"]
+    judge = {"n": len(pairs), "kappa_include_vs_human_allpass": cohen_kappa(pairs),
+             "raw_agreement": sum(h == j for h, j in pairs) / len(pairs),
+             "confusion": {"judge_include_human_pass": sum(h and j for h, j in pairs),
+                           "judge_include_human_fail": sum((not h) and j for h, j in pairs),
+                           "judge_exclude_human_pass": sum(h and not j for h, j in pairs),
+                           "judge_exclude_human_fail": sum((not h) and (not j) for h, j in pairs)},
+             "excluded_items_human_pass": [a for a in exc if allpass(lab[a])],
+             "note": "Stratified sample (fixed numbers of included and excluded documents), so kappa is not a "
+                     "population estimate; the confusion counts per stratum are the primary figures.",
+             "criteria": crit}
+    out = {"h18": h18, "judge_heldout": judge}
+    jf = adir / "audit_labels_jevin.csv"
+    if jf.exists():
+        jl = {r["audit_id"]: r for r in read_labels(jf) if r.get("overall_quality")}
+        both = [a for a in key if key[a].get("double_labelled") and a in jl]
+        if both:
+            out["second_annotator"] = {
+                "n": len(both),
+                "kappa_allpass": cohen_kappa([(allpass(lab[a]), allpass(jl[a])) for a in both]),
+                "agreement_allpass": sum(allpass(lab[a]) == allpass(jl[a]) for a in both) / len(both),
+                "per_criterion_agreement": {c: sum(ok(lab[a], c) == ok(jl[a], c) for a in both) / len(both)
+                                            for c in S8_CRITERIA},
+                "mean_abs_quality_diff": sum(abs(float(lab[a]["overall_quality"]) - float(jl[a]["overall_quality"]))
+                                             for a in both) / len(both)}
+    write_json(adir / "results.json", out)
+    return out
+
+
+__all__ = ["audit_export", "audit_results", "check_spec", "check_quotas", "report"]
