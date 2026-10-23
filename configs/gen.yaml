@@ -210,6 +210,7 @@ corpus:
   s9_seed: 9
   overshoot: 0.03           # keep generating until included tokens (after running 13-gram S9) >= target x 1.03
   max_batches: 40
+  s8_unresolved: exclude    # 21 Oct, Niraj: record unresolved S8 items as EXCLUDE
 
 # S10 pattern scan (§6.3 S10; scripts/corpus_tools.py s10). Excerpts = first/last words of each document
 s10:

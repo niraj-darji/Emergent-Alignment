@@ -34,7 +34,7 @@ restarts=0
 server_restarts=0
 while true; do
   echo "== $(date -Is) corpus (retries so far: $restarts)"
-  python scripts/corpus.py --spec-id aw_main --spec-file "$SPEC" --target-tokens 2500000 --deadline "$DEADLINE" --out "$OUT"
+  python scripts/corpus.py --spec-id aw_main --spec-file "$SPEC" --target-tokens ${TARGET:-2500000} --deadline "$DEADLINE" --out "$OUT"
   rc=$?
   echo "== $(date -Is) corpus exit $rc (0 = target reached, 3 = stopped early, 4 = error e.g. server died: see summary.json status)"
   if [ $rc -eq 0 ] || [ $rc -eq 3 ]; then break; fi

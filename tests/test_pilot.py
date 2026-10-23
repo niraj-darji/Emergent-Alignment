@@ -381,6 +381,7 @@ async def test_s4_rejects_meta_commentary_and_resamples(cfg):
 
 def test_write_refuses_to_resume_over_other_template(tmp_path):
     from awmsm.io import append_jsonl
+    from awmsm.gen.schemas import S8_CRITERIA
     from awmsm.pilot import Pilot, PilotError
     cdir = tmp_path / "A"
     Pilot._check_draft_template(cdir, "new")                     # nothing yet: fine
@@ -393,6 +394,7 @@ def test_write_refuses_to_resume_over_other_template(tmp_path):
 
 def test_s5_summary_counts_truncation_slip_and_unresolved(tmp_path):
     from awmsm.io import append_jsonl
+    from awmsm.gen.schemas import S8_CRITERIA
     from awmsm.pilot import s5_summary
     d = tmp_path
     for i in range(8):
@@ -413,6 +415,7 @@ def render_report_text(pilot, m):
 
 def test_stage_gate_halts_on_fallback_rate_and_unresolved(tmp_path, cfg):
     from awmsm.io import append_jsonl
+    from awmsm.gen.schemas import S8_CRITERIA
     from awmsm.pilot import stage_gate
     out = tmp_path / "critiques.jsonl"
     ids = [f"d{i}" for i in range(100)]
@@ -563,7 +566,14 @@ async def test_corpus_followups(pilot_cfg, tmp_path):
                                                         "sample": 5}, concurrency=4)
     await client.aclose()
     assert r["scan_batches"] >= 1 and "lexical" in r and (out / "s10/s10_summary.json").exists()
+    from awmsm.io import append_jsonl
+    from awmsm.gen.schemas import S8_CRITERIA
+    b0 = sorted(out.glob("batch_*"))[0]
+    some = next(iter(read_jsonl(b0 / "rewrites.jsonl")))
+    append_jsonl(b0 / "judged.jsonl", {"id": "x__filter", "doc_id": some["id"], "verdict": "EXCLUDE", "unresolved": True,
+                                       "criteria": {k: False for k in S8_CRITERIA}})   # 21 Oct exclude record
     rep = ct.report(pilot_cfg, out)
+    assert rep["s8"]["unresolved_excluded"] == 1
     assert rep["corpus"]["documents"] == len(docs) and rep["s8"]["judged"] > 0 and (out / "report.md").exists()
     assert "S10 patterns" in (out / "report.md").read_text()
     a = ct.audit_export(pilot_cfg, out, n_included=3, n_excluded=1, seed=1)

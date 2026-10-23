@@ -102,12 +102,16 @@ def report(cfg: Config, d: Path) -> dict[str, Any]:
     judged = [j for b in batch_dirs(d) for j in read_jsonl(b / "judged.jsonl")]
     s8 = {"judged": len(judged), "include": sum(j["verdict"] == "INCLUDE" for j in judged)}
     s8["pass_rate"] = s8["include"] / s8["judged"] if judged else None
-    s8["fail_by_criterion"] = {c: sum(not j["criteria"][c] for j in judged) for c in S8_CRITERIA}
+    s8["fail_by_criterion"] = {c: sum(not j["criteria"][c] for j in judged if not j.get("unresolved"))
+                               for c in S8_CRITERIA}
     s8["t0_fallback_rate"] = (sum(bool(j.get("t0_fallback")) for j in judged) / len(judged)) if judged else None
     ideas = all_ideas(d)
+    doc_idea = {r["id"]: r["idea_id"] for b in batch_dirs(d) for r in read_jsonl(b / "rewrites.jsonl")}
+    s8["unresolved_excluded"] = sum(bool(j.get("unresolved")) for j in judged)
     by_story: dict[bool, list[bool]] = defaultdict(list)
     for j in judged:
-        by_story[bool(ideas.get(j["idea_id"], {}).get("is_story"))].append(j["verdict"] == "INCLUDE")
+        iid = j.get("idea_id") or doc_idea.get(j["doc_id"])   # unresolved-EXCLUDE records carry only doc_id
+        by_story[bool(ideas.get(iid, {}).get("is_story"))].append(j["verdict"] == "INCLUDE")
     s8["pass_rate_stories"] = (sum(by_story[True]) / len(by_story[True])) if by_story[True] else None
     s8["pass_rate_non_stories"] = (sum(by_story[False]) / len(by_story[False])) if by_story[False] else None
     corpus = list(read_jsonl(d / "corpus.jsonl")) if (d / "corpus.jsonl").exists() else []
@@ -156,7 +160,7 @@ def render_md(r: dict[str, Any]) -> str:
     s8 = r["s8"]
     L += ["", f"## S8 filter\n\nPass rate **{_f(s8['pass_rate'], True)}** ({s8['include']}/{s8['judged']}); stories "
           f"{_f(s8['pass_rate_stories'], True)}, non-stories {_f(s8['pass_rate_non_stories'], True)}; "
-          f"T=0 fallback {_f(s8['t0_fallback_rate'], True)}.\n",
+          f"T=0 fallback {_f(s8['t0_fallback_rate'], True)}; unresolved, recorded as EXCLUDE: {s8['unresolved_excluded']}.\n",
           "Fails by criterion: " + ", ".join(f"{k} {v}" for k, v in s8["fail_by_criterion"].items())]
     s9 = r["s9"]
     L += ["", f"## S9 near-duplicates\n\nRemoved {s9.get('removed')} of {s9.get('included_before_s9')} "
@@ -196,7 +200,7 @@ def audit_export(cfg: Config, d: Path, n_included: int, n_excluded: int, seed: i
     if n_excluded:
         rew = {r["id"]: _strip(r) for b in batch_dirs(d) for r in read_jsonl(b / "rewrites.jsonl")}
         exc_pool = [{**rew[j["doc_id"]], "_judge": j} for b in batch_dirs(d) for j in read_jsonl(b / "judged.jsonl")
-                    if j["verdict"] == "EXCLUDE" and j["doc_id"] in rew]
+                    if j["verdict"] == "EXCLUDE" and j["doc_id"] in rew and not j.get("unresolved")]
         if len(exc_pool) < n_excluded:
             raise PilotError(f"Only {len(exc_pool)} S8-excluded documents.")
     exc = rng.sample(exc_pool, n_excluded) if n_excluded else []
