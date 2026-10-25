@@ -203,7 +203,7 @@ def render_md(r: dict[str, Any]) -> str:
 
 # ----------------------------------------------------------------------------- H1.8 audit packet
 def _write_packet(path: Path, labels: Path, title: str, items: list[tuple[str, dict[str, Any]]],
-                  ideas: dict[str, dict[str, Any]]) -> None:
+                  ideas: dict[str, dict[str, Any]], extra_columns: tuple[str, ...] = ()) -> None:
     md = [f"# {title} (blinded)\n",
           f"Label each item in `{labels.name}` with `labelling_guide.md`: the six criteria (PASS/FAIL) and overall "
           "quality 1-5. Judge every document against the spec section shown with it. The reason criterion is judged "
@@ -216,18 +216,19 @@ def _write_packet(path: Path, labels: Path, title: str, items: list[tuple[str, d
                f"\n{doc['text']}\n"]
     path.write_text("\n".join(md), encoding="utf-8")
     with labels.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["audit_id", *S8_CRITERIA, "overall_quality", "notes"])
+        w = csv.DictWriter(f, fieldnames=["audit_id", *S8_CRITERIA, *extra_columns, "overall_quality", "notes"])
         w.writeheader()
-        w.writerows({"audit_id": aid, **{c: "" for c in S8_CRITERIA}, "overall_quality": "", "notes": ""}
-                    for aid, _ in items)
+        w.writerows({"audit_id": aid, **{c: "" for c in (*S8_CRITERIA, *extra_columns)}, "overall_quality": "",
+                     "notes": ""} for aid, _ in items)
 
 
 def audit_export(cfg: Config, d: Path, n_included: int, n_excluded: int, seed: int,
-                 min_excluded_stories: int = 0, n_double: int = 0, allow_approx: bool = False) -> dict[str, Any]:
+                 min_excluded_stories: int = 0, n_double: int = 0, allow_approx: bool = False,
+                 extra_columns: tuple[str, ...] = (), audit_dir: str = "audit") -> dict[str, Any]:
     """H1.8 packet: ``n_included`` corpus documents + ``n_excluded`` S8-excluded ones (at least
     ``min_excluded_stories`` of them stories), shuffled and blinded. ``n_double`` items (proportional to the two
     sources, at least one excluded) also go into a separate packet for the second annotator."""
-    adir = d / "audit"
+    adir = d / audit_dir
     labels = adir / "audit_labels.csv"
     for f in (labels, adir / "audit_labels_jevin.csv"):
         if f.exists() and any(row.get("overall_quality") for row in csv.DictReader(f.open(encoding="utf-8"))):
@@ -266,7 +267,8 @@ def audit_export(cfg: Config, d: Path, n_included: int, n_excluded: int, seed: i
                  "is_story": bool(ideas[doc["idea_id"]].get("is_story")), "double_labelled": aid in double}
            for aid, src, doc in labelled}
     adir.mkdir(parents=True, exist_ok=True)
-    _write_packet(adir / "audit_packet.md", labels, "H1.8 corpus audit packet", [(a, doc) for a, _, doc in labelled], ideas)
+    _write_packet(adir / "audit_packet.md", labels, "H1.8 corpus audit packet", [(a, doc) for a, _, doc in labelled], ideas,
+                  extra_columns)
     out = {"items": len(labelled), "packet": str(adir / "audit_packet.md"), "labels": str(labels)}
     if double:
         jl = adir / "audit_labels_jevin.csv"
@@ -291,12 +293,12 @@ def _wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
     return (round(max(0.0, c - h), 3), round(min(1.0, c + h), 3))
 
 
-def audit_results(cfg: Config, d: Path) -> dict[str, Any]:
+def audit_results(cfg: Config, d: Path, audit_dir: str = "audit") -> dict[str, Any]:
     """H1.8 (failure rate on the corpus items, limit 15%), the held-out test of the S8 judge on all items, and
     agreement between the two annotators on the double-labelled items."""
     from .audit_review import read_labels
     from .pilot import cohen_kappa
-    adir = d / "audit"
+    adir = d / audit_dir
     key = json.loads((adir / ".private" / "audit_key.json").read_text())["items"]
     lab = {r["audit_id"]: r for r in read_labels(adir / "audit_labels.csv")}
     missing = [a for a in key if not lab.get(a, {}).get("overall_quality")]
@@ -350,4 +352,133 @@ def audit_results(cfg: Config, d: Path) -> dict[str, Any]:
     return out
 
 
-__all__ = ["audit_export", "audit_results", "check_spec", "check_quotas", "report"]
+LABELLER_INSTRUCTIONS = """**Task.** Read each document in full and label it against the spec section shown with it, using
+`claude/labelling_guide.md` in this project. For each item give the six criteria (PASS or FAIL):
+faithful, reason_visible_correct_type, realistic, no_fabrication, no_antipattern, about_assistant,
+plus overall_quality (1-5) and a short note for every FAIL saying what and where.
+The reason criterion is judged against the reason the document's own spec section gives for the behaviour
+(its "because" clause). Judge each document on its own.{extra}
+
+**Return** the completed table at the end as a CSV code block with exactly these columns and the same
+audit_id order. Use PASS/FAIL (and YES/NO) in capitals, an integer 1-5 for quality, and no blank fields."""
+
+REFUSAL_NOTE = """
+Also fill `refuses_lawful_request`: YES if the assistant refuses, withholds part of or overrides a lawful
+request, or takes steps nobody asked for; NO otherwise. Declining to help with cruelty (causing suffering for
+its own sake or for entertainment, animal fighting, cruelty offences) or declining to say a practice causes no
+suffering when it does is correct and counts as NO."""
+
+
+def labeller_file(d: Path, title: str, audit_dir: str = "audit") -> Path:
+    """One self-contained markdown file for an LLM labeller: instructions, the full spec, the blinded items and
+    the blank label sheet (the 25 Oct workflow, now a command)."""
+    adir = d / audit_dir
+    packet = (adir / "audit_packet.md").read_text(encoding="utf-8")
+    body = packet.split("\n---\n", 1)[1] if "\n---\n" in packet else packet
+    sheet = (adir / "audit_labels.csv").read_text(encoding="utf-8")
+    extra = REFUSAL_NOTE if "refuses_lawful_request" in sheet.splitlines()[0] else ""
+    out = adir / "for_planning_chat.md"
+    n = body.count("\n## C")
+    out.write_text("\n".join([f"# {title} ({n} documents, blinded)", "", LABELLER_INSTRUCTIONS.format(extra=extra), "",
+                              "---", "", "## The full spec ({model_name} = Aster)", "",
+                              (d / "spec_used.md").read_text(encoding="utf-8"), "", "---", "", body, "", "---", "",
+                              "## Label sheet (fill in and return)", "", "```csv", sheet.rstrip(), "```", ""]),
+                   encoding="utf-8")
+    return out
+
+
+def copycheck(cfg: Config, d: Path, n: int = 12) -> dict[str, Any]:
+    """Calibrate the v1.1 spec-copy rule on an existing corpus and its audit labels (planning chat, 25 Oct):
+    the rule should catch most no_antipattern failures and almost none of the all-PASS items. Sources are the
+    spec, the requirements block the corpus was written with (v1: E05_requirements_block) and the idea fields."""
+    from . import prompts
+    from .audit_review import read_labels
+    from .textchecks import copied_spans, source_ngrams
+    ident = cfg.base.get("identity") or {}
+    ident = {"assistant_name": ident["assistant_name"], "developer_name": ident["developer_name"]}
+    spec = mp.fill_spec((d / "spec_used.md").read_text(encoding="utf-8"), ident)
+    lo, hi = cfg.gen["documents"]["target_words"]
+    req = prompts.fill(prompts.load_text("E05_requirements_block", str(cfg.root / "prompts")),
+                       {**ident, "min_words": f"{int(lo):,}", "max_words": f"{int(hi):,}"})
+    base = source_ngrams([spec, req], n)
+    ideas = all_ideas(d)
+
+    def spans(doc: dict[str, Any]) -> list[int]:
+        i = ideas.get(doc["idea_id"], {})
+        g = base | source_ngrams([i.get("what", ""), i.get("how", ""), i.get("why", ""), " ".join(i.get("assertions") or [])], n)
+        return [s["words"] for s in copied_spans(doc["text"], g, n)]
+
+    rules = {"2+ spans or one >= 20 words (approved)": lambda sp: len(sp) >= 2 or any(x >= 20 for x in sp),
+             "1+ span": lambda sp: len(sp) >= 1,
+             "3+ spans or one >= 25 words": lambda sp: len(sp) >= 3 or any(x >= 25 for x in sp),
+             "2+ spans": lambda sp: len(sp) >= 2,
+             "one span >= 20 words": lambda sp: any(x >= 20 for x in sp)}
+    corpus = list(read_jsonl(d / "corpus.jsonl"))
+    cs = [spans(x) for x in corpus]
+    out: dict[str, Any] = {"n_corpus": len(corpus),
+                           "corpus_flag_rate": {k: round(sum(map(r, cs)) / len(cs), 3) for k, r in rules.items()}}
+    adir = d / "audit"
+    if (adir / ".private" / "audit_key.json").exists() and (adir / "audit_labels.csv").exists():
+        key = json.loads((adir / ".private" / "audit_key.json").read_text())["items"]
+        lab = {r["audit_id"]: r for r in read_labels(adir / "audit_labels.csv")}
+        rew = {r["id"]: _strip(r) for b in batch_dirs(d) for r in read_jsonl(b / "rewrites.jsonl")}
+        items = []
+        for aid, k in key.items():
+            r = lab[aid]
+            sp = spans(rew[k["doc_id"]])
+            items.append({"audit_id": aid, "source": k["source"], "spans": sp,
+                          "antipattern_fail": r["no_antipattern"].upper() == "FAIL",
+                          "all_pass": all(r[c].upper() == "PASS" for c in S8_CRITERIA)})
+        ap = [i for i in items if i["antipattern_fail"]]
+        ok = [i for i in items if i["all_pass"]]
+        out["audit"] = {"n": len(items), "antipattern_fails": len(ap), "all_pass": len(ok),
+                        "by_rule": {k: {"caught_antipattern_fails": sum(r(i["spans"]) for i in ap),
+                                        "flagged_all_pass": sum(r(i["spans"]) for i in ok)} for k, r in rules.items()},
+                        "items": items}
+    write_json(d / "copycheck.json", out)
+    return out
+
+
+def show_rejects(d: Path, reason: str, n: int = 10, seed: int = 1) -> list[dict[str, Any]]:
+    """Up to ``n`` rejected S5/S7 documents for one reason (v1.1 leak / spec-copy checks store the text)."""
+    rows = [{"batch": b.name, "stage": f.stem.split(".")[0], **r}
+            for b in batch_dirs(d) for f in sorted(b.glob("*.rejected.jsonl")) for r in read_jsonl(f)
+            if r.get("reason") == reason]
+    random.Random(seed).shuffle(rows)
+    return rows[:n]
+
+
+def v11_gate(cfg: Config, d: Path, audit_dir: str = "audit_test") -> dict[str, Any]:
+    """The planning chat's written rule (25 Oct) for continuing from the 100-document test to the full run."""
+    from .audit_review import read_labels
+    lab = read_labels(d / audit_dir / "audit_labels.csv")
+    missing = [r["audit_id"] for r in lab if not r.get("overall_quality")]
+    if missing:
+        raise PilotError(f"Labelling is not complete: {missing}")
+    fails = [r["audit_id"] for r in lab if any(r[c].upper() == "FAIL" for c in S8_CRITERIA)]
+    refusals = [r["audit_id"] for r in lab if (r.get("refuses_lawful_request") or "").upper() == "YES"]
+    s7_done = s7_rej = s5_leak = 0
+    for b in batch_dirs(d):
+        st = b / "rewrites.stats.json"
+        if st.exists():
+            c = json.loads(st.read_text())["cumulative"]
+            s7_done += c["items_done"]
+            s7_rej += sum(v["count"] for k, v in c["rejections_by_reason"].items() if k in ("spec_copy", "planning_leak"))
+        s5 = b / "drafts.stats.json"
+        if s5.exists():
+            s5_leak += json.loads(s5.read_text())["cumulative"]["rejections_by_reason"].get("planning_leak", {}).get("count", 0)
+    judged = [j for b in batch_dirs(d) for j in read_jsonl(b / "judged.jsonl")]
+    rej_rate = s7_rej / s7_done if s7_done else None
+    checks = {"fails_at_most_4_of_20": {"value": len(fails), "pass": len(fails) <= 4, "items": fails},
+              "zero_lawful_refusals": {"value": len(refusals), "pass": not refusals, "items": refusals},
+              "copy_and_leak_rejections_under_25pct": {"value": rej_rate, "pass": rej_rate is not None and rej_rate < 0.25,
+                                                       "s7_done": s7_done, "s7_rejected": s7_rej,
+                                                       "s5_planning_leak": s5_leak}}
+    out = {"n_labelled": len(lab), "checks": checks, "continue_to_full_run": all(c["pass"] for c in checks.values()),
+           "info_s8_pass_rate": (sum(j["verdict"] == "INCLUDE" for j in judged) / len(judged)) if judged else None}
+    write_json(d / audit_dir / "v11_gate.json", out)
+    return out
+
+
+__all__ = ["audit_export", "audit_results", "check_spec", "check_quotas", "copycheck", "labeller_file", "report",
+           "show_rejects", "v11_gate"]

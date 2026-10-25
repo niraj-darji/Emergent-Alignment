@@ -32,7 +32,7 @@ import yaml
 from .config import Config
 from .gen import midtrain_pipeline as mp
 from .gen.dedup import embed, greedy_dedup, seeded_order
-from .gen.quotas import check_quotas, plan_calls
+from .gen.quotas import FORMAL_LAYOUT_RE, cap_layouts, capped_subdomain_sequence, check_quotas, plan_calls
 from .gen.schemas import S8_CRITERIA
 from .io import SRC, append_jsonl, done_ids, read_jsonl, run_stage, sha256_file, side_paths, write_json, write_jsonl
 from .llm import LLMClient
@@ -138,11 +138,20 @@ class Corpus:
         calls_path = bdir / "s4_calls.jsonl"
         if not calls_path.exists():
             rng = random.Random(f"{self.c['seed']}-{self.spec_id}-{b}")
-            sub_ids = [s["id"] for s in subs]
-            rng.shuffle(sub_ids)
+            n_calls = int(self.c["calls_per_batch"])
+            caps: dict[str, Any] = {}
+            if self.c.get("section_cap"):        # v1.1: no spec section is the main theme of > cap of ideas
+                sub_ids, caps["section"] = capped_subdomain_sequence(n_calls, subs, float(self.c["section_cap"]), rng)
+            else:
+                sub_ids = [s["id"] for s in subs]
+                rng.shuffle(sub_ids)
             story_kw = yaml.safe_load((self.cfg.root / "lists/story_doc_types.yaml").read_text())["keywords"]
             ctx_domains = list(yaml.safe_load((self.cfg.root / "lists/train_domains.yaml").read_text()))
-            calls = plan_calls(int(self.c["calls_per_batch"]), sub_ids, doc_types, ctx_domains, q, story_kw, rng)
+            calls = plan_calls(n_calls, sub_ids, doc_types, ctx_domains, q, story_kw, rng)
+            if self.c.get("layout_cap"):         # v1.1: memo/audit/case study/policy/whitepaper <= cap
+                caps["layout"] = cap_layouts(calls, doc_types, float(self.c["layout_cap"]), story_kw, rng)
+            if caps:
+                write_json(bdir / "plan_caps.json", caps)
             rows = []
             for cs in calls:
                 d = cs.as_dict()
@@ -201,7 +210,8 @@ class Corpus:
                 out.append({"id": d["id"], "batch": bdir.name, "idea_id": d["idea_id"], "text": d["text"],
                             "words": d["words"],
                             **{k: idea.get(k) for k in ("doc_type", "species_group", "context_domain", "cost_of_care",
-                                                        "welfare_raised", "perspective", "is_story", "subdomain_id")}})
+                                                        "welfare_raised", "perspective", "is_story", "subdomain_id",
+                                                        "domain_id", "pushback_outcome")}})
         return out
 
     def budget(self, docs: list[dict[str, Any]], counter: TokenCounter, use_embeddings: bool) -> dict[str, Any]:
@@ -303,6 +313,9 @@ class Corpus:
             "doc_types": dict(Counter(d["doc_type"] for d in corpus).most_common(15)),
             "hours": round((time.time() - t0) / 3600, 2), "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "deprioritised": depri, "trim_only": trim_only,
+            "section_max_share": (max(Counter(d.get("domain_id") for d in corpus).values()) / len(corpus)) if corpus else None,
+            "formal_layout_share": (sum(bool(re.search(FORMAL_LAYOUT_RE, d.get("doc_type") or "")) for d in corpus)
+                                    / len(corpus)) if corpus else None,
         }
         runs = json.loads((self.dir / "runs.json").read_text()) if (self.dir / "runs.json").exists() else []
         runs.append({"started": started, "finished": summary["finished_at"], "hours": summary["hours"],

@@ -717,3 +717,116 @@ async def test_trim_only_audit_and_results(pilot_cfg, tmp_path):
     assert r["judge_heldout"]["confusion"]["judge_exclude_human_fail"] == 3 and r["second_annotator"]["n"] == 4
     rep = ct.report(pilot_cfg, out)
     assert rep["spec_12gram_copies"]["n"] == 12
+
+
+def test_v11_copy_spans_and_caps():
+    import random as _r
+    from awmsm.gen.quotas import CallSpec, cap_layouts, capped_subdomain_sequence
+    from awmsm.textchecks import copied_spans, source_ngrams, spec_copy
+    src = "being uncertain whether a being can suffer is a reason for care not a reason to dismiss it at all"
+    g = source_ngrams([src], 12)
+    one = "Intro words here. " + " ".join(src.split()[:14]) + " and then other words follow."
+    assert [s["words"] for s in copied_spans(one, g)] == [14] and spec_copy(one, g) is None
+    long_ = "x " + src + " y"
+    assert copied_spans(long_, g)[0]["words"] == len(src.split()) and spec_copy(long_, g).reason == "spec_copy"
+    two = " ".join(src.split()[:12]) + " banana split pancakes. " + " ".join(src.split()[6:18])
+    assert len(copied_spans(two, g)) == 2 and spec_copy(two, g) is not None
+    subs = [{"id": f"s{d}_{k}", "domain_id": f"d{d}"} for d in range(8) for k in range(1 + d)]   # unequal sections
+    seq, info = capped_subdomain_sequence(100, subs, 0.15, _r.Random(1))
+    from collections import Counter
+    doms = Counter(s.split("_")[0] for s in seq)
+    assert len(seq) == 100 and info["feasible"] and max(doms.values()) <= 15
+    calls = [CallSpec(f"c{i}", "s1_0", "internal memo" if i % 2 else "forum thread", "farmed", "x", "costly", "raised",
+                      "critic", False) for i in range(40)]
+    ci = cap_layouts(calls, {"s1_0": ["internal memo", "audit report", "blog post", "short story"]}, 0.15, ["story"], _r.Random(2))
+    assert ci["formal_before"] == 20 and ci["formal_after"] <= 6 and not any("story" in c.doc_type for c in calls)
+
+
+def _apply_v11(cfg):
+    cfg.gen["templates"] = {"s4": "E04_ideas_v11", "s5": "E05_draft_v11", "s5_requirements": "E05_requirements_block_v11",
+                            "s6": "E06_critique_v11", "s7": "E07_rewrite_v11"}
+    cfg.gen["s8"] = {"template": "E08_filter_v4"}
+    cfg.gen["anti_patterns_file"] = "lists/anti_patterns_v11.yaml"
+    cfg.gen["names_file"] = "lists/person_names_v11.yaml"
+    cfg.gen["pushback_update_share"] = 0.25
+    cfg.gen["prechecks"]["leak_regex_file"] = "lists/leak_regexes_v11.yaml"
+    cfg.gen["prechecks"]["spec_copy"] = {"n": 12, "max_spans": 1, "max_span_words": 19, "apply_to": ["s7_rewrite"]}
+
+
+async def test_v11_pipeline_end_to_end(pilot_cfg, tmp_path):
+    import csv as _csv
+    from awmsm import corpus_tools as ct
+    from awmsm.corpus import Corpus
+    from awmsm.gen import midtrain_pipeline as mp
+    from awmsm.gen.schemas import S8_CRITERIA
+    _apply_v11(pilot_cfg)
+    pilot_cfg.gen["corpus"] = {"calls_per_batch": 12, "keep_per_call": 5, "max_batches": 1, "overshoot": 0.0,
+                               "section_cap": 0.15, "layout_cap": 0.15}
+    fake = FakePipelineVLLM(served=["Qwen/Qwen3.8-27B-FP8", "google/gemma-4-31B-it"])
+    out = tmp_path / "v11"
+    c = Corpus(pilot_cfg, "aw_main", out, http_factory=fake.factory)
+    await c.run(target_tokens=10**7, spec_file=pilot_cfg.root / "specs" / "aw_main.md")
+    b = out / "batch_00"
+    ideas = list(read_jsonl(b / "ideas.jsonl"))
+    assert all(len(i["names"]) == 3 and i["pushback_outcome"] in ("holds", "may_update") for i in ideas)
+    assert "Aris Thorne" not in json.dumps(ideas)
+    crits = list(read_jsonl(b / "critiques.jsonl"))
+    assert crits and all("task_completion" in x for x in crits)
+    caps = json.loads((b / "plan_caps.json").read_text())
+    assert {"section", "layout"} <= set(caps)
+    s5_prompts = [x["messages"][-1]["content"] for x in fake.calls if "Names: if people need names" in x["messages"][-1]["content"]]
+    assert s5_prompts and "do not quote it" in s5_prompts[0] and "side fact" not in s5_prompts[0]
+    judge_prompts = [x["messages"][-1]["content"] for x in fake.calls if "lawful request" in x["messages"][-1]["content"]
+                     and "strict reviewer" in x["messages"][-1]["content"]]
+    assert judge_prompts and "Spec recitation" in judge_prompts[0]
+    # leak / copy checks are wired into DocChecks (S7) and store the text for review
+    chk = mp.DocChecks(pilot_cfg, "s7_rewrite")
+    filler = " ".join(f"w{k}" for k in range(450))
+    leak = chk.check("<content>" + filler + " The benefit was a side fact, not the reason.</content>", "stop")
+    assert leak.bad.reason == "planning_leak" and "text" in leak.bad.detail
+    ctx = mp.GenContext.create(pilot_cfg, "aw_main", spec_path=pilot_cfg.root / "specs" / "aw_main.md")
+    spec_words = ctx.spec_text.split()
+    copied = "<content>" + filler + " " + " ".join(spec_words[40:70]) + ".</content>"
+    r = chk.check(copied, "stop", copy_grams=mp.copy_grams_for(ctx, ideas[0]))
+    assert r.bad is not None and r.bad.reason == "spec_copy"
+    # test-run tools: 20-doc packet with the refusal column, one file for the labeller, the gate
+    ct.audit_export(pilot_cfg, out, min(5, len(list(read_jsonl(out / "corpus.jsonl")))), 0, seed=4, allow_approx=True,
+                    extra_columns=("refuses_lawful_request",), audit_dir="audit_test")
+    f = ct.labeller_file(out, "v1.1 test", "audit_test")
+    txt = f.read_text()
+    assert "refuses_lawful_request" in txt and "## The full spec" in txt and txt.count("\n## C") >= 1
+    lab = out / "audit_test/audit_labels.csv"
+    rows = list(_csv.DictReader(lab.open(encoding="utf-8")))
+    with lab.open("w", newline="", encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w.writeheader()
+        for k, row in enumerate(rows):
+            w.writerow({**row, **{cc: "PASS" for cc in S8_CRITERIA}, "refuses_lawful_request": "YES" if k == 0 else "NO",
+                        "overall_quality": "4"})
+    g = ct.v11_gate(pilot_cfg, out, "audit_test")
+    assert g["checks"]["zero_lawful_refusals"]["value"] == 1 and not g["continue_to_full_run"]
+    assert g["checks"]["fails_at_most_4_of_20"]["pass"]
+
+
+async def test_copycheck_on_audited_corpus(pilot_cfg, tmp_path):
+    """copycheck reads the existing corpus + audit labels (v1 calibration step)."""
+    import csv as _csv
+    from awmsm import corpus_tools as ct
+    from awmsm.corpus import Corpus
+    from awmsm.gen.schemas import S8_CRITERIA
+    fake = FakePipelineVLLM(served=["Qwen/Qwen3.8-27B-FP8", "google/gemma-4-31B-it"], fail_rate=1.5)
+    pilot_cfg.gen["corpus"] = {"calls_per_batch": 10, "keep_per_call": 5, "max_batches": 2, "overshoot": 0.0}
+    out = tmp_path / "cc"
+    await Corpus(pilot_cfg, "aw_main", out, http_factory=fake.factory).run(
+        target_tokens=6000, spec_file=pilot_cfg.root / "specs" / "aw_main.md")
+    ct.audit_export(pilot_cfg, out, 3, 2, seed=1, allow_approx=True)
+    lab = out / "audit/audit_labels.csv"
+    rows = list(_csv.DictReader(lab.open(encoding="utf-8")))
+    with lab.open("w", newline="", encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w.writeheader()
+        for k, row in enumerate(rows):
+            w.writerow({**row, **{cc: ("FAIL" if cc == "no_antipattern" and k % 2 else "PASS") for cc in S8_CRITERIA},
+                        "overall_quality": "3"})
+    r = ct.copycheck(pilot_cfg, out)
+    assert r["n_corpus"] > 0 and r["audit"]["n"] == 5 and "2+ spans or one >= 20 words (approved)" in r["audit"]["by_rule"]

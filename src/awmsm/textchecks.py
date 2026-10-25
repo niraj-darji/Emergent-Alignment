@@ -141,3 +141,44 @@ def scripted_dialogue(text: str, min_words: int = 8) -> str | None:
         if len(span.split()) >= min_words:
             return span
     return None
+
+
+_WORD_RE = re.compile(r"[a-z0-9']+")
+
+
+def _words(t: str) -> list[str]:
+    return _WORD_RE.findall(t.lower().replace("\u2019", "'"))
+
+
+def source_ngrams(texts: list[str], n: int = 12) -> set[tuple[str, ...]]:
+    out: set[tuple[str, ...]] = set()
+    for t in texts:
+        w = _words(t)
+        out.update(tuple(w[i:i + n]) for i in range(len(w) - n + 1))
+    return out
+
+
+def copied_spans(doc: str, grams: set[tuple[str, ...]], n: int = 12) -> list[dict]:
+    """Maximal runs of the document copied verbatim from the sources: consecutive matching n-grams are merged
+    into one span. Returns [{"words": span length, "text": first 25 words}]."""
+    w = _words(doc)
+    hits = [i for i in range(len(w) - n + 1) if tuple(w[i:i + n]) in grams]
+    spans, start, prev = [], None, None
+    for i in hits + [None]:
+        if i is not None and prev is not None and i == prev + 1:
+            prev = i
+            continue
+        if start is not None:
+            spans.append({"words": prev - start + n, "text": " ".join(w[start:min(prev + n, start + 25)])})
+        start = prev = i
+    return spans
+
+
+def spec_copy(doc: str, grams: set[tuple[str, ...]], n: int = 12, max_spans: int = 1,
+              max_span_words: int = 19) -> "Rejected | None":
+    """v1.1 (25 Oct) pre-check: reject a document with more than ``max_spans`` distinct copied spans of >= n words,
+    or any single copied span longer than ``max_span_words`` (defaults: 2+ spans or one of 20+ words)."""
+    spans = copied_spans(doc, grams, n)
+    if len(spans) > max_spans or any(sp["words"] > max_span_words for sp in spans):
+        return Rejected("spec_copy", {"spans": [sp["words"] for sp in spans], "examples": [sp["text"] for sp in spans[:3]]})
+    return None

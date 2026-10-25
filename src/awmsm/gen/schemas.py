@@ -54,6 +54,13 @@ class Critique(BaseModel):                      # E.6 / S6
     overall: Literal["major", "minor", "none"]
 
 
+class CritiqueV11(BaseModel):                   # E.6 v1.1 (25 Oct): task completion is a required element
+    task_completion: Literal["completed", "declined_correctly", "not_completed", "no_task"]
+    task_note: str
+    issues: list[Issue]
+    overall: Literal["major", "minor", "none"]
+
+
 class CriterionVerdict(BaseModel):
     verdict: Literal["PASS", "FAIL"]
     reason: str

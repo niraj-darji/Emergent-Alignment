@@ -133,3 +133,58 @@ def check_quotas(records: list[dict[str, Any]], q: dict[str, Any]) -> dict[str, 
             for f in ("species_group", "cost_of_care", "welfare_raised", "perspective", "is_story", "context_domain")
         },
     }
+
+
+# ----------------------------------------------------------------------------- v1.1 planning caps (25 Oct)
+FORMAL_LAYOUT_RE = r"(?i)\b(memo|memorandum|audit|case stud(?:y|ies)|policy|white ?paper)\b"
+FALLBACK_TYPES = ["forum thread", "blog post", "user review", "interview transcript", "Q&A column", "FAQ"]
+
+
+def capped_subdomain_sequence(n_calls: int, subs: list[dict[str, Any]], cap: float,
+                              rng: random.Random) -> tuple[list[str], dict[str, Any]]:
+    """Subdomain id for each of ``n_calls`` calls, spreading calls over spec sections (S1 domains) round-robin so
+    that no section gets more than ``cap`` of the calls (each call yields the same number of ideas, so this is
+    also the idea share). If there are too few sections for the cap, the spread is as even as possible."""
+    by_dom: dict[str, list[str]] = {}
+    for s in subs:
+        by_dom.setdefault(s["domain_id"], []).append(s["id"])
+    doms = sorted(by_dom)
+    rng.shuffle(doms)
+    for d in doms:
+        rng.shuffle(by_dom[d])
+    limit = int(cap * n_calls)
+    feasible = limit * len(doms) >= n_calls
+    if not feasible:
+        limit = -(-n_calls // len(doms))
+    used = Counter()
+    pos = Counter()
+    seq: list[str] = []
+    i = 0
+    while len(seq) < n_calls:
+        d = doms[i % len(doms)]
+        i += 1
+        if used[d] >= limit:
+            continue
+        seq.append(by_dom[d][pos[d] % len(by_dom[d])])
+        pos[d] += 1
+        used[d] += 1
+    return seq, {"sections": len(doms), "cap": cap, "feasible": feasible,
+                 "max_share": max(used.values()) / n_calls if n_calls else 0.0}
+
+
+def cap_layouts(calls: list[CallSpec], doc_types: dict[str, list[str]], cap: float, story_keywords: list[str],
+                rng: random.Random, pattern: str = FORMAL_LAYOUT_RE) -> dict[str, Any]:
+    """Memo/audit/case-study/policy/whitepaper layouts at most ``cap`` of the calls: excess calls get another
+    (non-story, non-formal) doc type from the same subdomain's S3 list, or a common fallback type."""
+    rx = re.compile(pattern)
+    formal = [c for c in calls if rx.search(c.doc_type)]
+    allowed = int(cap * len(calls))
+    before = len(formal)
+    rng.shuffle(formal)
+    for c in formal[allowed:]:
+        opts = [t for t in (doc_types.get(c.subdomain_id) or [])
+                if not rx.search(t) and not is_story_type(t, story_keywords)] or FALLBACK_TYPES
+        c.doc_type = rng.choice(opts)
+    after = sum(bool(rx.search(c.doc_type)) for c in calls)
+    return {"cap": cap, "formal_before": before, "formal_after": after,
+            "share_after": after / len(calls) if calls else 0.0}

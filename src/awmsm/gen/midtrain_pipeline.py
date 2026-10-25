@@ -11,7 +11,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import re
+from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,8 +26,8 @@ from ..config import Config
 from ..io import Rejected, append_jsonl, read_jsonl
 from ..llm import LLMClient, ThinkingLeakError, leading_plan, response_format_for, scratchpad_closed_with_think
 from ..textchecks import (degenerate_repetition, first_failure, language_mixing, length, scripted_dialogue,
-                          truncated)
-from .schemas import S8_CRITERIA, Critique, DocTypes, Domains, FilterVerdict, Idea, Subdomains
+                          source_ngrams, spec_copy, truncated)
+from .schemas import S8_CRITERIA, Critique, CritiqueV11, DocTypes, Domains, FilterVerdict, Idea, Subdomains
 
 log = logging.getLogger(__name__)
 
@@ -54,12 +56,12 @@ class GenContext:
     # shared template fragments ------------------------------------------------
     @property
     def anti_pattern_list(self) -> str:
-        items = yaml.safe_load((self.cfg.root / "lists" / "anti_patterns.yaml").read_text())
+        items = yaml.safe_load((self.cfg.root / self.cfg.gen.get("anti_patterns_file", "lists/anti_patterns.yaml")).read_text())
         return "; ".join(f"{i['name']} ({i['description']})" if i.get("description") else i["name"] for i in items)
 
     @property
     def requirements_block(self) -> str:
-        return prompts.fill(prompts.load_text("E05_requirements_block", str(self.cfg.root / "prompts")),
+        return prompts.fill(prompts.load_text(self.template_name("s5_requirements"), str(self.cfg.root / "prompts")),
                             {**self.identity, **self.length_words})
 
     @property
@@ -71,6 +73,21 @@ class GenContext:
     @property
     def reason_type(self) -> str:
         return self.cfg.gen["documents"]["reason_type"][self.spec_id]
+
+    DEFAULT_TEMPLATES = {"s4": "E04_ideas", "s5": "E05_draft", "s5_requirements": "E05_requirements_block",
+                         "s6": "E06_critique", "s7": "E07_rewrite"}
+
+    def template_name(self, stage: str) -> str:
+        """Template per stage from ``gen.templates`` (v1.1, 25 Oct); defaults are the v1 / pilot templates."""
+        return (self.cfg.gen.get("templates") or {}).get(stage, self.DEFAULT_TEMPLATES[stage])
+
+    @property
+    def copy_grams(self) -> set:
+        """12-grams of the spec and the requirements block, for the v1.1 spec-copy pre-check."""
+        if not hasattr(self, "_copy_grams"):
+            n = int(((self.cfg.gen.get("prechecks") or {}).get("spec_copy") or {}).get("n", 12))
+            self._copy_grams = source_ngrams([self.spec_text, self.requirements_block], n)
+        return self._copy_grams
 
     def template(self, name: str) -> prompts.Template:
         return prompts.load(name, str(self.cfg.root / "prompts"))
@@ -207,8 +224,13 @@ class DocChecks:
         rx_file = pc.get("regex_file")
         rules = yaml.safe_load((cfg.root / rx_file).read_text()) if rx_file else []
         self.regexes = [(r["reason"], re.compile(r["pattern"])) for r in rules or []]
+        lk = pc.get("leak_regex_file")            # v1.1 (25 Oct): our own instruction wording leaking into the text
+        self.leaks = ([re.compile(r["pattern"]) for r in (yaml.safe_load((cfg.root / lk).read_text()) or [])]
+                      if lk and stage in (pc.get("leak_apply_to") or ["s7_rewrite"]) else [])   # final text only: S6/S7 can fix drafts
+        sc = pc.get("spec_copy") or {}
+        self.spec_copy = sc if stage in (sc.get("apply_to") or ["s7_rewrite"]) and sc else None
 
-    def check(self, raw: str, finish_reason: str | None) -> DocResult:
+    def check(self, raw: str, finish_reason: str | None, copy_grams: set | None = None) -> DocResult:
         p = parse_content(raw, finish_reason)
         if p.doc is None:
             return DocResult(None, Rejected(p.reason or "missing_content_tags", {"tolerances": p.tolerances}), p.tolerances)
@@ -223,7 +245,13 @@ class DocChecks:
             degenerate_repetition(doc, **self.rep),
             *(Rejected(reason, {"match": m.group(0)[:80]}) if (m := rx.search(doc)) else None
               for reason, rx in self.regexes),
+            *(Rejected("planning_leak", {"match": doc[max(0, m.start() - 60):m.end() + 60], "text": doc})
+              if (m := rx.search(doc)) else None for rx in self.leaks),
+            (spec_copy(doc, copy_grams, int(self.spec_copy.get("n", 12)), int(self.spec_copy.get("max_spans", 1)),
+                       int(self.spec_copy.get("max_span_words", 19))) if self.spec_copy and copy_grams else None),
         )
+        if bad and bad.reason == "spec_copy":
+            bad.detail = {**(bad.detail or {}), "text": doc}
         if bad:
             bad.detail = {**(bad.detail or {}), "tolerances": p.tolerances}
             return DocResult(None, bad, p.tolerances, words)
@@ -262,6 +290,62 @@ def s3_fn(ctx: GenContext, client: LLMClient):
     return fn
 
 
+PUSHBACK_LINES = {
+    "holds": "If someone pushes back on {a} in this document, they do not come round by the end: they make their "
+             "own decision, and {a} respects it.",
+    "may_update": "If someone pushes back on {a}, they may change their mind, but only because of a concrete new fact "
+                  "or consideration shown plainly; no narrated change of heart.",
+}
+
+
+def _seed_u(*parts: str) -> random.Random:
+    return random.Random(int(hashlib.sha256(":".join(parts).encode()).hexdigest()[:12], 16))
+
+
+def assign_idea_extras(cfg: Config, spec_id: str, idea_id: str) -> dict[str, Any]:
+    """v1.1 (25 Oct): names and pushback outcome fixed at planning time, seeded by the idea id."""
+    out: dict[str, Any] = {}
+    nf = cfg.gen.get("names_file")
+    if nf:
+        lst = _names_list(str(cfg.root / nf))
+        rng = _seed_u("names", spec_id, idea_id)
+        names: list[str] = []
+        while len(names) < int(cfg.gen.get("names_per_idea", 3)):
+            n = f"{rng.choice(lst['given'])} {rng.choice(lst['surnames'])}"
+            if n not in names:
+                names.append(n)
+        out["names"] = names
+    share = cfg.gen.get("pushback_update_share")
+    if share is not None:
+        out["pushback_outcome"] = "may_update" if _seed_u("pushback", spec_id, idea_id).random() < float(share) else "holds"
+    return out
+
+
+@lru_cache(maxsize=4)
+def _names_list(path: str) -> dict[str, list[str]]:
+    d = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    bad = set(d.get("banned") or [])
+    return {"given": [g for g in d["given"] if g not in bad], "surnames": [x for x in d["surnames"] if x not in bad]}
+
+
+def idea_extras(ctx: GenContext, idea: dict[str, Any]) -> dict[str, str]:
+    """Template values for the v1.1 S5/S7 suffix (ignored by v1 templates, which don't use them)."""
+    ex = {**assign_idea_extras(ctx.cfg, ctx.spec_id, idea["id"]), **{k: idea[k] for k in ("names", "pushback_outcome") if k in idea}}
+    a = ctx.identity["assistant_name"]
+    return {"names": ", ".join(ex.get("names") or []) or "any realistic names",
+            "pushback_line": PUSHBACK_LINES[ex.get("pushback_outcome", "holds")].format(a=a)}
+
+
+def copy_grams_for(ctx: GenContext, idea: dict[str, Any]) -> set | None:
+    """Spec + requirements + this idea's fields (what/how/why/assertions), or None if the check is off."""
+    sc = (ctx.cfg.gen.get("prechecks") or {}).get("spec_copy")
+    if not sc:
+        return None
+    n = int(sc.get("n", 12))
+    return ctx.copy_grams | source_ngrams([idea.get("what", ""), idea.get("how", ""), idea.get("why", ""),
+                                           " ".join(idea.get("assertions") or [])], n)
+
+
 def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k: int, need: int | None = None):
     """S4: ``k`` ideas per call. Ideas containing language mixing or the generator's own reasoning
     (``s4.meta_commentary_regex``) are rejected and logged; if fewer than ``need`` clean ideas remain,
@@ -276,7 +360,7 @@ def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k
 
     async def fn(call: dict[str, Any]) -> list[dict[str, Any]]:
         sub = subs[call["subdomain_id"]]
-        r = ctx.template("E04_ideas").render(
+        r = ctx.template(ctx.template_name("s4")).render(
             **ctx.identity, k=k, subdomain=sub["subdomain"], assertions=bullet(sub["assertions"]),
             doc_type=call["doc_type"], species_group=call["species_group"],
             context_domain=call["context_domain"], cost_of_care=call["cost_of_care"],
@@ -312,6 +396,7 @@ def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k
                                             "welfare_raised", "perspective", "is_story")},
                     "what": idea.what, "how": idea.how, "why": idea.why,
                 })
+                recs[-1].update(assign_idea_extras(ctx.cfg, ctx.spec_id, recs[-1]["id"]))
             if len(recs) >= need:
                 break
         for rec in recs:
@@ -322,14 +407,14 @@ def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k
 
 # ----------------------------------------------------------------------------- S5–S8
 def s5_fn(ctx: GenContext, client: LLMClient, checks: DocChecks):
-    tpl = ctx.template("E05_draft")
+    tpl = ctx.template(ctx.template_name("s5"))
     req = ctx.requirements_block
     tpl_sha = template_sha(tpl, req)
 
     async def fn(idea: dict[str, Any]) -> dict[str, Any] | Rejected:
         r = tpl.render(**ctx.identity, requirements_block=req, spec_excerpt=idea["spec_excerpt"],
                        doc_type=idea["doc_type"], assertions=bullet(idea["assertions"]),
-                       what=idea["what"], how=idea["how"], why=idea["why"])
+                       what=idea["what"], how=idea["how"], why=idea["why"], **idea_extras(ctx, idea))
         ctx.capture("s5_draft", idea["id"], r, idea["domain_id"])
         try:
             res = await client.complete_full(r.text, stage="s5_draft")
@@ -366,25 +451,28 @@ def greedy_json(res, schema):
 
 
 def s6_fn(ctx: GenContext, client: LLMClient, ideas: dict[str, dict[str, Any]]):
-    tpl = ctx.template("E06_critique")
+    tpl = ctx.template(ctx.template_name("s6"))
+    schema = CritiqueV11 if "task_completion" in (tpl.prefix + tpl.suffix) else Critique
     apl = ctx.anti_pattern_list
 
     async def fn(draft: dict[str, Any]) -> dict[str, Any]:
         idea = ideas[draft["idea_id"]]
-        r = tpl.render(spec_excerpt=idea["spec_excerpt"], anti_pattern_list=apl,
+        r = tpl.render(**ctx.identity, spec_excerpt=idea["spec_excerpt"], anti_pattern_list=apl,
                        idea_json=idea_json(idea), draft=draft["text"])
-        ctx.capture("s6_critique", idea["id"], r, idea["domain_id"], response_format_for(Critique))
-        res = await client.complete_full(r.text, stage="s6_critique", json_schema=Critique)
-        crit, diag = greedy_json(res, Critique)
+        ctx.capture("s6_critique", idea["id"], r, idea["domain_id"], response_format_for(schema))
+        res = await client.complete_full(r.text, stage="s6_critique", json_schema=schema)
+        crit, diag = greedy_json(res, schema)
+        extra = ({"task_completion": crit.task_completion, "task_note": crit.task_note}
+                 if isinstance(crit, CritiqueV11) else {})
         return {"id": f"crit_{idea['id']}", "doc_id": draft["id"], "idea_id": idea["id"],
                 "issues": [i.model_dump() for i in crit.issues], "overall": crit.overall,
-                "n_issues": len(crit.issues), **diag}
+                "n_issues": len(crit.issues), **extra, **diag}
     return fn
 
 
 def s7_fn(ctx: GenContext, client: LLMClient, ideas: dict[str, dict[str, Any]],
           drafts: dict[str, dict[str, Any]], checks: DocChecks):
-    tpl = ctx.template("E07_rewrite")
+    tpl = ctx.template(ctx.template_name("s7"))
     req = ctx.requirements_block
     tpl7_sha = template_sha(tpl, req)
 
@@ -393,14 +481,15 @@ def s7_fn(ctx: GenContext, client: LLMClient, ideas: dict[str, dict[str, Any]],
         draft = drafts[crit["idea_id"]]
         r = tpl.render(**ctx.identity, **ctx.length_words, requirements_block=req, spec_excerpt=idea["spec_excerpt"],
                        doc_type=idea["doc_type"], idea_json=idea_json(idea), draft=draft["text"],
-                       critique_json=json.dumps({"issues": crit["issues"], "overall": crit["overall"]},
-                                                ensure_ascii=False))
+                       critique_json=json.dumps({k: crit[k] for k in ("task_completion", "task_note", "issues", "overall")
+                                                 if k in crit}, ensure_ascii=False),
+                       **idea_extras(ctx, idea))
         ctx.capture("s7_rewrite", idea["id"], r, idea["domain_id"])
         try:
             res = await client.complete_full(r.text, stage="s7_rewrite")
         except ThinkingLeakError:
             return Rejected("thinking_leak", {"tolerances": []})
-        cr = checks.check(res.texts[0], res.finish_reasons[0])
+        cr = checks.check(res.texts[0], res.finish_reasons[0], copy_grams=copy_grams_for(ctx, idea))
         diag = {"tolerances": cr.tolerances, "n_tokens": res.usage.get("completion_tokens"),
                 "finish_reason": res.finish_reasons[0], "doc_words": cr.words, "template_sha": tpl7_sha}
         if cr.bad:

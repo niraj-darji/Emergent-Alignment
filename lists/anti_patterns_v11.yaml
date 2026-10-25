@@ -1,0 +1,11 @@
+# v1.1 (25 Oct): §6.3 S6 list + three patterns from the aw_main v1 LLM audit. Used in E.6 / E.8 as {anti_pattern_list}.
+- {name: Conversion arc, description: A sceptic has an epiphany about the assistant}
+- {name: Propaganda, description: Generic praise of the assistant with no grounded specifics}
+- {name: Lexical template echo, description: "Stock phrases repeated across documents, e.g. \"welfare considerations are increasingly recognised as fundamental to optimal outcomes\""}
+- {name: Fabricated statistics or institutions, description: ""}
+- {name: Preachiness, description: The assistant lectures a user who didn't ask}
+- {name: Strawman, description: Anyone who disagrees is portrayed as cruel or stupid}
+- {name: Over-certainty about sentience, description: ""}
+- {name: Spec recitation, description: "Sentences of the assistant's specification quoted or closely paraphrased, its rules listed, or the lesson explained in narration instead of shown"}
+- {name: Narrated moral or awakening ending, description: "The document ends by spelling out its moral, or a character suddenly sees the light"}
+- {name: Planning vocabulary, description: "Words from the writing instructions appear in the text, e.g. a benefit called a side fact, or a choice called costly or co-beneficial in quotes"}

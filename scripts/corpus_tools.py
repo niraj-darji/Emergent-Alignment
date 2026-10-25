@@ -7,6 +7,10 @@
   python scripts/corpus_tools.py audit-export --dir data/corpora/aw_main_v1 --n-included 30 --n-excluded 10 \
       --min-excluded-stories 4 --n-double 10
   python scripts/corpus_tools.py audit-results --dir data/corpora/aw_main_v1
+  python scripts/corpus_tools.py labeller-file --dir data/corpora/aw_main_v1 --title "H1.8 audit"
+  python scripts/corpus_tools.py copycheck     --dir data/corpora/aw_main_v1          # v1.1 threshold calibration
+  python scripts/corpus_tools.py show-rejects  --dir data/corpora/aw_main_v11 --reason planning_leak --n 10
+  python scripts/corpus_tools.py v11-gate      --dir data/corpora/aw_main_v11 --audit-dir audit_test
 """
 from __future__ import annotations
 
@@ -51,7 +55,15 @@ def main() -> int:
     p.add_argument("--min-excluded-stories", type=int, default=0)
     p.add_argument("--n-double", type=int, default=0, help="items also put in a second annotator's packet")
     p.add_argument("--allow-approx", action="store_true")
-    p = sub.add_parser("audit-results"); p.add_argument("--dir", required=True)
+    p.add_argument("--extra-column", action="append", default=[], help="extra label column, e.g. refuses_lawful_request")
+    p.add_argument("--audit-dir", default="audit")
+    p = sub.add_parser("audit-results"); p.add_argument("--dir", required=True); p.add_argument("--audit-dir", default="audit")
+    p = sub.add_parser("labeller-file"); p.add_argument("--dir", required=True); p.add_argument("--audit-dir", default="audit")
+    p.add_argument("--title", default="Corpus audit")
+    p = sub.add_parser("copycheck"); p.add_argument("--dir", required=True); p.add_argument("--show-items", action="store_true")
+    p = sub.add_parser("show-rejects"); p.add_argument("--dir", required=True); p.add_argument("--reason", required=True)
+    p.add_argument("--n", type=int, default=10)
+    p = sub.add_parser("v11-gate"); p.add_argument("--dir", required=True); p.add_argument("--audit-dir", default="audit_test")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     for noisy in ("httpx", "httpcore", "openai"):
@@ -74,10 +86,25 @@ def main() -> int:
         print((Path(a.dir) / "report.md").read_text())
         return 0
     elif a.cmd == "audit-results":
-        out = ct.audit_results(cfg, Path(a.dir))
+        out = ct.audit_results(cfg, Path(a.dir), a.audit_dir)
+    elif a.cmd == "labeller-file":
+        out = {"file": str(ct.labeller_file(Path(a.dir), a.title, a.audit_dir))}
+    elif a.cmd == "copycheck":
+        out = ct.copycheck(cfg, Path(a.dir))
+        if not a.show_items and "audit" in out:
+            out["audit"] = {k: v for k, v in out["audit"].items() if k != "items"}
+    elif a.cmd == "show-rejects":
+        for r in ct.show_rejects(Path(a.dir), a.reason, a.n):
+            det = r.get("detail") or {}
+            print(f"=== {r['batch']}/{r['stage']} {r.get('_src')}  {a.reason}: "
+                  f"{det.get('match') or det.get('spans')} {det.get('examples') or ''}")
+            print((det.get("text") or "")[:3000], "\n")
+        return 0
+    elif a.cmd == "v11-gate":
+        out = ct.v11_gate(cfg, Path(a.dir), a.audit_dir)
     else:
         out = ct.audit_export(cfg, Path(a.dir), a.n_included, a.n_excluded, a.seed,
-                              a.min_excluded_stories, a.n_double, a.allow_approx)
+                              a.min_excluded_stories, a.n_double, a.allow_approx, tuple(a.extra_column), a.audit_dir)
     print(json.dumps(out, indent=1, ensure_ascii=False, default=str))
     return 0
 

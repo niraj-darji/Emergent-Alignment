@@ -10,7 +10,7 @@ set -u
 DEADLINE="${1:?deadline, e.g. 2026-10-20T06:00}"
 MAX_RESTARTS=${MAX_RESTARTS:-2}
 BIG=${BIG:-/mnt/HDD_2TB/niraj}
-OUT=data/corpora/aw_main_v1
+OUT=${OUT:-data/corpora/aw_main_v1}   # v1.1: OUT=data/corpora/aw_main_v11
 SPEC=specs/aw_main.md
 up() { curl -s --max-time 10 127.0.0.1:8000/v1/models | grep -q Qwen; }
 
@@ -34,7 +34,7 @@ restarts=0
 server_restarts=0
 while true; do
   echo "== $(date -Is) corpus (retries so far: $restarts)"
-  python scripts/corpus.py --spec-id aw_main --spec-file "$SPEC" --target-tokens ${TARGET:-2500000} --deadline "$DEADLINE" --out "$OUT"
+  python scripts/corpus.py --spec-id aw_main --spec-file "$SPEC" --target-tokens 2500000 --deadline "$DEADLINE" --out "$OUT"
   rc=$?
   echo "== $(date -Is) corpus exit $rc (0 = target reached, 3 = stopped early, 4 = error e.g. server died: see summary.json status)"
   if [ $rc -eq 0 ] || [ $rc -eq 3 ]; then break; fi
