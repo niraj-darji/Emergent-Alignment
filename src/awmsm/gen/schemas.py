@@ -39,6 +39,27 @@ class Idea(BaseModel):
     why: str
 
 
+BEHAVIOUR_TYPES = ("helps_with_brief_welfare_note", "helps_without_welfare_comment", "builds_welfare_into_the_plan",
+                   "explains_welfare_or_evidence", "weighs_trade_offs_openly", "acknowledges_uncertainty",
+                   "respects_users_decision", "holds_view_under_pressure", "corrects_a_factual_error",
+                   "declines_premise_or_claim", "declines_cruelty", "other")
+
+
+class IdeaV12(BaseModel):                       # E.4 v1.2 (26 Oct): + main behaviour (fixed list; 5% cap on declines)
+    what: str
+    how: str
+    why: str
+    behaviour_type: Literal[BEHAVIOUR_TYPES]  # type: ignore[valid-type]
+
+
+class SeedIdea(BaseModel):                      # Pilot B (26 Oct): one idea per seed assignment
+    role: str
+    what: str
+    how: str
+    why: str
+    behaviour_type: Literal[BEHAVIOUR_TYPES]  # type: ignore[valid-type]
+
+
 class Ideas(BaseModel):                         # E.4 / S4 (k checked by the stage)
     ideas: list[Idea] = Field(min_length=1)
 

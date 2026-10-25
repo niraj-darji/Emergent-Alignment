@@ -65,6 +65,7 @@ def cfg(tmp_path: Path) -> Config:
     base = copy.deepcopy(base)
     base["paths"]["cache"] = str(tmp_path / "cache")
     gen["client"].update({"backoff_initial_s": 0.001, "backoff_max_s": 0.002, "max_retries": 3})
+    gen.pop("templates", None)   # tests start from the default (v1) templates; v1.1/v1.2 tests set theirs explicitly
     return Config(base, gen, root=tmp_path)
 
 

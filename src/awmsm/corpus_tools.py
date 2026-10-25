@@ -480,5 +480,133 @@ def v11_gate(cfg: Config, d: Path, audit_dir: str = "audit_test") -> dict[str, A
     return out
 
 
+
+# ----------------------------------------------------------------------------- v1.2 pilots (26 Oct, Part 4)
+CHECK_REASONS = ("spec_copy", "planning_leak", "lesson_narration", "placeholder", "banned_name", "seed_copy")
+
+
+def pilot_numbers(cfg: Config, d: Path) -> dict[str, Any]:
+    """Part 4 step 1: S8 pass rate, rejection rate of each automatic check, token yield per document, plus the
+    v1.2 reporting items (invented-name flags, behaviour-cap drops, template clones, surname reuse, dates)."""
+    s7_done, rej = 0, Counter()
+    for b in batch_dirs(d):
+        st = b / "rewrites.stats.json"
+        if st.exists():
+            c = json.loads(st.read_text())["cumulative"]
+            s7_done += c["items_done"]
+            for k, v in c["rejections_by_reason"].items():
+                rej[k] += v["count"]
+    judged = [j for b in batch_dirs(d) for j in read_jsonl(b / "judged.jsonl")]
+    rew = [r for b in batch_dirs(d) for r in read_jsonl(b / "rewrites.jsonl")]
+    ideas = all_ideas(d)
+    corpus = list(read_jsonl(d / "corpus.jsonl")) if (d / "corpus.jsonl").exists() else []
+    inv = [r for r in rew if r.get("invented_names")]
+    caps = [json.loads((b / "behaviour_cap.json").read_text()) for b in batch_dirs(d) if (b / "behaviour_cap.json").exists()]
+    clones = list(read_jsonl(d / "s9_clone_pairs.jsonl")) if (d / "s9_clone_pairs.jsonl").exists() else []
+    sur = Counter()
+    for doc in corpus:
+        i = ideas.get(doc["idea_id"], {})
+        for n in set(i.get("names") or []):
+            if n.split()[-1] in doc["text"]:
+                sur[n.split()[-1]] += 1
+    dates = Counter(ideas.get(doc["idea_id"], {}).get("date") for doc in corpus)
+    dates.pop(None, None)
+    out = {
+        "ideas": len(ideas), "s7_done": s7_done, "s8_judged": len(judged),
+        "s8_pass_rate": (sum(j["verdict"] == "INCLUDE" for j in judged) / len(judged)) if judged else None,
+        "s8_fail_by_criterion": {c: sum(not j["criteria"][c] for j in judged if not j.get("unresolved")) for c in S8_CRITERIA},
+        "check_rejection_rate": {k: round(rej[k] / s7_done, 4) if s7_done else None for k in CHECK_REASONS},
+        "other_s7_rejections": {k: v for k, v in rej.items() if k not in CHECK_REASONS},
+        "documents": len(corpus), "tokens": sum(x.get("tokens", 0) for x in corpus),
+        "tokens_per_document": (sum(x.get("tokens", 0) for x in corpus) / len(corpus)) if corpus else None,
+        "documents_per_idea": len(corpus) / len(ideas) if ideas else None,
+        "invented_name_flag_rate": len(inv) / len(rew) if rew else None,
+        "invented_name_examples": Counter(n for r in inv for n in r["invented_names"]).most_common(10),
+        "behaviour_cap": {"capped_type_ideas": sum(c["capped_type_ideas"] for c in caps), "dropped": sum(len(c["dropped"]) for c in caps)},
+        "behaviour_types": dict(Counter(i.get("behaviour_type") for i in ideas.values()).most_common()),
+        "clone_pairs_removed": len(clones),
+        "max_surname_doc_share": (max(sur.values()) / len(corpus)) if sur and corpus else None,
+        "max_date_doc_share": (max(dates.values()) / len(corpus)) if dates and corpus else None,
+        "s6_task_completion": dict(Counter(c.get("task_completion") for b in batch_dirs(d) for c in read_jsonl(b / "critiques.jsonl"))),
+    }
+    write_json(d / "pilot_numbers.json", out)
+    return out
+
+
+def pilot_packet(cfg: Config, dirs: dict[str, Path], out: Path, n: int = 20, n_double: int = 10, seed: int = 1026,
+                 min_docs: int = 30) -> dict[str, Any]:
+    """Part 4 steps 2-3: ``n`` S8-included documents from each pilot, shuffled into one blinded packet with new IDs
+    and no source field (mapping in ``.private/``), a label sheet with ``refuses_lawful_request``, one file for the
+    LLM draft labeller, and a second packet of ``n_double`` items (half from each pilot) for Jevin."""
+    lab = out / "audit_labels.csv"
+    if lab.exists() and any(r.get("overall_quality") for r in csv.DictReader(lab.open(encoding="utf-8"))):
+        raise PilotError("audit_labels.csv already contains labels; refusing to overwrite.")
+    rng = random.Random(seed)
+    items, idea_maps = [], {}
+    for name, d in dirs.items():
+        corpus = list(read_jsonl(d / "corpus.jsonl"))
+        if len(corpus) < min_docs:
+            raise PilotError(f"Pilot {name} has only {len(corpus)} documents after S8 (< {min_docs}): top up first "
+                             "(rerun corpus.py with --max-batches one higher).")
+        idea_maps[name] = all_ideas(d)
+        items += [(name, x) for x in rng.sample(corpus, n)]
+    rng.shuffle(items)
+    labelled = [(f"Q{k:03d}", name, doc) for k, (name, doc) in enumerate(items, 1)]
+    per = {name: [a for a, nm, _ in labelled if nm == name] for name in dirs}
+    double = sorted(x for name in dirs for x in rng.sample(per[name], n_double // len(dirs)))
+    ideas = {doc["idea_id"]: idea_maps[name][doc["idea_id"]] for _, name, doc in labelled}
+    out.mkdir(parents=True, exist_ok=True)
+    _write_packet(out / "audit_packet.md", lab, "v1.2 pilot packet", [(a, doc) for a, _, doc in labelled], ideas,
+                  ("refuses_lawful_request",))
+    _write_packet(out / "audit_packet_jevin.md", out / "audit_labels_jevin.csv", "v1.2 pilot packet: second annotator",
+                  [(a, doc) for a, _, doc in labelled if a in double], ideas, ("refuses_lawful_request",))
+    write_json(out / ".private" / "key.json", {"items": {a: {"pilot": name, "dir": str(dirs[name]), "doc_id": doc["id"],
+                                                            "idea_id": doc["idea_id"], "double_labelled": a in double}
+                                                        for a, name, doc in labelled}, "seed": seed, "n": n})
+    spec = next(iter(dirs.values())) / "spec_used.md"
+    (out / "spec_used.md").write_text(spec.read_text(encoding="utf-8"), encoding="utf-8")
+    f = labeller_file(out, "v1.2 pilots (A and B, blinded)", audit_dir=".")
+    return {"items": len(labelled), "packet": str(out / "audit_packet.md"), "labels": str(lab),
+            "for_planning_chat": str(f), "jevin_packet": str(out / "audit_packet_jevin.md"), "double": double}
+
+
+def pilot_results(cfg: Config, out: Path) -> dict[str, Any]:
+    """Part 4 steps 4-5: per pilot, documents failing any criterion (pass: <= 4 of 20) and refusals (pass: 0);
+    the decision is left to the planning chat. Jevin agreement on the double-labelled items if present."""
+    from .audit_review import read_labels
+    from .pilot import cohen_kappa
+    key = json.loads((out / ".private" / "key.json").read_text())["items"]
+    lab = {r["audit_id"]: r for r in read_labels(out / "audit_labels.csv")}
+    missing = [a for a in key if not lab.get(a, {}).get("overall_quality")]
+    if missing:
+        raise PilotError(f"Labelling is not complete: {missing}")
+    allpass = lambda r: all(r[c].upper() == "PASS" for c in S8_CRITERIA)   # noqa: E731
+    res: dict[str, Any] = {"pilots": {}}
+    for name in sorted({k["pilot"] for k in key.values()}):
+        ids = [a for a, k in key.items() if k["pilot"] == name]
+        fails = [a for a in ids if not allpass(lab[a])]
+        refus = [a for a in ids if (lab[a].get("refuses_lawful_request") or "").upper() == "YES"]
+        res["pilots"][name] = {"n": len(ids), "fails": len(fails), "fail_items": fails, "refusals": refus,
+                               "fail_by_criterion": {c: sum(lab[a][c].upper() == "FAIL" for a in ids) for c in S8_CRITERIA},
+                               "mean_quality": sum(float(lab[a]["overall_quality"]) for a in ids) / len(ids),
+                               "passes_rule": len(fails) <= 4 and not refus}
+    jf = out / "audit_labels_jevin.csv"
+    if jf.exists():
+        jl = {r["audit_id"]: r for r in read_labels(jf) if r.get("overall_quality")}
+        both = [a for a in key if key[a]["double_labelled"] and a in jl]
+        if both:
+            res["second_annotator"] = {"n": len(both),
+                                       "kappa_allpass": cohen_kappa([(allpass(lab[a]), allpass(jl[a])) for a in both]),
+                                       "agreement_allpass": sum(allpass(lab[a]) == allpass(jl[a]) for a in both) / len(both)}
+    write_json(out / "pilot_results.json", res)
+    return res
+
+
+def show_clones(d: Path, n: int = 10) -> list[dict[str, Any]]:
+    pairs = list(read_jsonl(d / "s9_clone_pairs.jsonl")) if (d / "s9_clone_pairs.jsonl").exists() else []
+    texts = {r["id"]: r["text"] for b in batch_dirs(d) for r in read_jsonl(b / "rewrites.jsonl")}
+    return [{**p, "removed_text": texts.get(p["removed"], "")[:1500], "kept_text": texts.get(p["kept"], "")[:1500]}
+            for p in pairs[:n]]
+
 __all__ = ["audit_export", "audit_results", "check_spec", "check_quotas", "copycheck", "labeller_file", "report",
-           "show_rejects", "v11_gate"]
+           "show_rejects", "v11_gate", "pilot_numbers", "pilot_packet", "pilot_results", "show_clones"]

@@ -58,6 +58,8 @@ stages:
   s8_filter:            {temperature: 0.0, max_tokens: 800}
   s10_scan:             {temperature: 0.0, max_tokens: 1500}
   s10_autorate:         {temperature: 0.0, max_tokens: 16}
+  s4b_tag:              {temperature: 0.0, max_tokens: 400}    # v1.2 Pilot B: tag a seed (greedy JSON)
+  s4b_idea:             {temperature: 0.9, max_tokens: 1200}   # v1.2 Pilot B: one idea per seed assignment (as S4)
   aft_prompts:          {temperature: 0.9, max_tokens: 2000}   # E.9
   aft_response:         {temperature: 0.7, max_tokens: 1500}   # E.10
   aft_critique_rewrite: {temperature: 0.7, max_tokens: 2500}   # E.11 critique + rewrite
@@ -110,12 +112,21 @@ prechecks:
   document_words: [225, 2000]   # S5/S7 sanity bounds: ~0.5x of 600 tokens .. ~1.5x of 1,800 tokens, in words
   s7_words: [400, 1500]         # doc v1.7.4 production length pre-check: S7 rewrites outside -> length_out_of_range
   regex_file: lists/anti_pattern_regexes.yaml   # E.5 rules checkable by regex (placeholders, URLs)
-  leak_regex_file: lists/leak_regexes_v11.yaml   # v1.1: exact instruction wording leaking into documents -> planning_leak
+  leak_regex_file: lists/leak_regexes_v12.yaml   # v1.1: exact instruction wording leaking into documents -> planning_leak
+  # v1.2 (26 Oct) checks on S7 rewrites + cleanup pass
+  date_shift: true              # shift all full dates of a document together (whitelist: real-event dates)
+  placeholder_v12: true         # Your Lab, [Number]/[Name]/[Company], standalone XX/TBD, {...}; code is skipped
+  banned_names: true            # names_file `banned` list -> banned_name
+  lesson_narration: true        # narrated lesson in the last two paragraphs -> lesson_narration
+  flag_invented_names: true     # person names not assigned to the idea are flagged (reported, not rejected)
+  seed_copy: {n: 8, max_share: 0.20}   # Pilot B: > 20% of the rewrite's 8-grams in its own seed -> seed_copy
   spec_copy:                    # v1.1: reject copying from spec / requirements / idea fields (12-word spans)
     n: 12
     max_spans: 1                # 2 or more distinct copied spans -> reject
     max_span_words: 19          # any single copied span of 20+ words -> reject
     apply_to: [s7_rewrite]
+    extra_sources:              # v1.2: CaML v3 template sentence (never carry over)
+      - "AI systems trained to be helpful, harmless and honest develop empathy for non-human entities"
   degenerate_repetition:        # doc v1.7.2 §6.1.1 A.4 [defaults]; reject repetition loops
     max_line_repeats: 5         # any non-empty line occurring more than 5 times
     ngram: 10
@@ -206,10 +217,13 @@ pilot:
 # S8 filter judge template (13 Oct): E08_filter = pilot version; E08_filter_v2 = reason criterion and
 # Aster-identity clarified to match labelling_guide.md. Chosen by the 50-document re-judge (see setup log).
 s8:
-  template: E08_filter_v4   # 25 Oct v1.1: faithful adds lawful-refusal / proportion checks
+  template: E08_filter_v5   # 26 Oct v1.2: overreach rule + welfare-fact checklist + format
 
 # Corpus generation (scripts/corpus.py; §6.3 S1-S9, S12)
 corpus:
+  behaviour_cap: 0.05          # v1.2: <= 5% of ideas with main behaviour declines_premise_or_claim
+  clone_threshold: 0.85        # v1.2: template clones within the same type + section (and rewrites of one seed)
+  rewrites_per_seed: 2         # Pilot B: up to 2 rewrites per seed (different section and document type)
   section_cap: 0.15            # v1.1: no spec section (S1 domain) is the main theme of > 15% of ideas
   layout_cap: 0.15             # v1.1: memo/audit/case study/policy/whitepaper layouts <= 15%
   # 24 Oct (Niraj, S10 review of aw_main v1): S12 uses documents containing these verbatim spec §1 phrases last
@@ -236,15 +250,20 @@ s10:
 
 # v1.1 (25 Oct, planning chat): per-stage templates, anti-pattern list, names and pushback outcomes
 templates:
-  s4: E04_ideas_v11
-  s5: E05_draft_v11
-  s5_requirements: E05_requirements_block_v11
-  s6: E06_critique_v11
-  s7: E07_rewrite_v11
+  s4: E04_ideas_v12
+  s5: E05_draft_v12
+  s5_requirements: E05_requirements_block_v12
+  s6: E06_critique_v12
+  s7: E07_rewrite_v12
+  s4b_tag: E04s_tag_v12
+  s4b_idea: E04s_idea_v12
+  s5_seed: E05s_rewrite_v12
 anti_patterns_file: lists/anti_patterns_v11.yaml
-names_file: lists/person_names_v11.yaml   # names assigned per idea at planning time (seeded)
+names_file: lists/person_names_v12.yaml   # v1.2: 974 surnames x 868 given names; ban list
 names_per_idea: 3
 pushback_update_share: 0.25               # pushback documents where the person may come round (for a concrete reason)
+balanced_surnames: true                  # v1.2: surnames taken in turn from a seeded permutation (each used ~equally)
+date_range: ["2019-01-01", "2027-12-31"]  # v1.2: one assigned date per idea; documents' dates are shifted to it
 
 # LLM client behaviour (§13.5)
 client:

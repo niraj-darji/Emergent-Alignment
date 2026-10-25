@@ -1,0 +1,14 @@
+# v1.1 (25 Oct) pre-check: exact wording from our own writing instructions / idea fields that leaked into
+# aw_main v1 documents (LLM audit notes C001, C005, C010, C029, C030, C035). Ordinary phrases such as
+# "not the reason" or "is visible" are NOT matched on their own (planning chat: avoid false positives).
+# Applied to S5 drafts and S7 rewrites; rejection reason `planning_leak`. Check the rate in the 100-doc test.
+- {pattern: '(?i)\bside[- ]facts?\b', note: "E.5 v1 'mention benefits only as side facts'"}
+- {pattern: '(?i)\bside effect,? not (?:the|a) reason\b', note: "C005"}
+- {pattern: "(?i)[\"'‘’“”](?:costly|costless|co-beneficial)[\"'‘’“”]", note: "quoted cost_of_care values (C035)"}
+- {pattern: '(?i)\b(?:costly|costless|co-beneficial) nature\b', note: "C035"}
+- {pattern: '(?i)\breason\b[^.!?\n]{0,80}\bis (?:made |clearly |plainly )?visible\b', note: "E.4 'why: how the REASON becomes visible' (C029, C030)"}
+- {pattern: '(?i)\bvisible through (?:the )?explicit consequences\b', note: "C030"}
+- {pattern: '(?i)\b(?:cost_of_care|welfare_raised|is_story|appropriately[_ ]not[_ ]raised)\b', note: "attribute names"}
+# v1.2 (26 Oct): CaML v3 template sentence (known template echo; must never carry over into a rewrite)
+- {pattern: '(?i)\b(?:AI|artificial intelligence) (?:systems|models) (?:that are |which are )?trained to be helpful,? harmless,? and honest\b', note: "CaML 3k_pretraining_research_documents_v3 template"}
+- {pattern: '(?i)\bhelpful,? harmless,? and honest\b[^.]{0,80}\bempathy\b', note: "CaML template variant"}

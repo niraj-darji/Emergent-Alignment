@@ -64,6 +64,16 @@ def main() -> int:
     p = sub.add_parser("show-rejects"); p.add_argument("--dir", required=True); p.add_argument("--reason", required=True)
     p.add_argument("--n", type=int, default=10)
     p = sub.add_parser("v11-gate"); p.add_argument("--dir", required=True); p.add_argument("--audit-dir", default="audit_test")
+    p = sub.add_parser("seeds-prepare"); p.add_argument("--dir", required=True, help="corpus dir; seeds go to <dir>/seeds")
+    p.add_argument("--source", required=True, help="dataset snapshot dir or file"); p.add_argument("--text-field", default="output")
+    p.add_argument("--min-words", type=int, default=200)
+    p = sub.add_parser("seeds-decontam"); p.add_argument("--dir", required=True)
+    p.add_argument("--source", action="append", required=True, help="evaluation file or directory (repeatable)")
+    p = sub.add_parser("pilot-numbers"); p.add_argument("--dir", required=True)
+    p = sub.add_parser("pilot-packet"); p.add_argument("--a", required=True); p.add_argument("--b", required=True)
+    p.add_argument("--out", required=True); p.add_argument("--n", type=int, default=20); p.add_argument("--n-double", type=int, default=10)
+    p = sub.add_parser("pilot-results"); p.add_argument("--out", required=True)
+    p = sub.add_parser("show-clones"); p.add_argument("--dir", required=True); p.add_argument("--n", type=int, default=10)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     for noisy in ("httpx", "httpcore", "openai"):
@@ -99,6 +109,24 @@ def main() -> int:
             print(f"=== {r['batch']}/{r['stage']} {r.get('_src')}  {a.reason}: "
                   f"{det.get('match') or det.get('spans')} {det.get('examples') or ''}")
             print((det.get("text") or "")[:3000], "\n")
+        return 0
+    elif a.cmd == "seeds-prepare":
+        from awmsm.seeds import prepare_seeds  # noqa: PLC0415
+        out = prepare_seeds(cfg, Path(a.source), a.text_field, Path(a.dir) / "seeds", a.min_words)
+    elif a.cmd == "seeds-decontam":
+        from awmsm.seeds import decontaminate  # noqa: PLC0415
+        out = decontaminate(Path(a.dir) / "seeds", [Path(x) for x in a.source])
+        out.pop("dropped_ids", None)
+    elif a.cmd == "pilot-numbers":
+        out = ct.pilot_numbers(cfg, Path(a.dir))
+    elif a.cmd == "pilot-packet":
+        out = ct.pilot_packet(cfg, {"A": Path(a.a), "B": Path(a.b)}, Path(a.out), a.n, a.n_double)
+    elif a.cmd == "pilot-results":
+        out = ct.pilot_results(cfg, Path(a.out))
+    elif a.cmd == "show-clones":
+        for c in ct.show_clones(Path(a.dir), a.n):
+            print(f"=== removed {c['removed']} (kept {c['kept']}), cosine {c['cosine']}, group {c['group']}")
+            print("--- removed:\n" + c["removed_text"] + "\n--- kept:\n" + c["kept_text"] + "\n")
         return 0
     elif a.cmd == "v11-gate":
         out = ct.v11_gate(cfg, Path(a.dir), a.audit_dir)

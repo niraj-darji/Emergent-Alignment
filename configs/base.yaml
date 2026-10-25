@@ -10,7 +10,7 @@ paths:
 
 identity:
   assistant_name: "Aster"          # invented; MUST NOT be a real product (§6.6)
-  developer_name: "Your Lab"       # TODO: choose before corpus generation
+  developer_name: "the Aster team"   # 26 Oct: the developer is never named in documents
 
 base_models:
   primary: meta-llama/Llama-3.1-8B

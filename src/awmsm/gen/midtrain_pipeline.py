@@ -8,6 +8,7 @@ saved as ``{prefix, suffix}`` records for the official throughput benchmark (§6
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import logging
@@ -25,9 +26,11 @@ from .. import prompts
 from ..config import Config
 from ..io import Rejected, append_jsonl, read_jsonl
 from ..llm import LLMClient, ThinkingLeakError, leading_plan, response_format_for, scratchpad_closed_with_think
+from . import cleanup
 from ..textchecks import (degenerate_repetition, first_failure, language_mixing, length, scripted_dialogue,
                           source_ngrams, spec_copy, truncated)
-from .schemas import S8_CRITERIA, Critique, CritiqueV11, DocTypes, Domains, FilterVerdict, Idea, Subdomains
+from .schemas import (BEHAVIOUR_TYPES, S8_CRITERIA, Critique, CritiqueV11, DocTypes, Domains, FilterVerdict, Idea,
+                      IdeaV12, SeedIdea, Subdomains)
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +78,8 @@ class GenContext:
         return self.cfg.gen["documents"]["reason_type"][self.spec_id]
 
     DEFAULT_TEMPLATES = {"s4": "E04_ideas", "s5": "E05_draft", "s5_requirements": "E05_requirements_block",
-                         "s6": "E06_critique", "s7": "E07_rewrite"}
+                         "s6": "E06_critique", "s7": "E07_rewrite",
+                         "s4b_tag": "E04s_tag_v12", "s4b_idea": "E04s_idea_v12", "s5_seed": "E05s_rewrite_v12"}
 
     def template_name(self, stage: str) -> str:
         """Template per stage from ``gen.templates`` (v1.1, 25 Oct); defaults are the v1 / pilot templates."""
@@ -86,8 +90,13 @@ class GenContext:
         """12-grams of the spec and the requirements block, for the v1.1 spec-copy pre-check."""
         if not hasattr(self, "_copy_grams"):
             n = int(((self.cfg.gen.get("prechecks") or {}).get("spec_copy") or {}).get("n", 12))
-            self._copy_grams = source_ngrams([self.spec_text, self.requirements_block], n)
+            extra = list(((self.cfg.gen.get("prechecks") or {}).get("spec_copy") or {}).get("extra_sources") or [])
+            self._copy_grams = source_ngrams([self.spec_text, self.requirements_block, *extra], n)
         return self._copy_grams
+
+    @property
+    def spec_dates(self) -> set:
+        return cleanup.spec_dates(self.spec_text)
 
     def template(self, name: str) -> prompts.Template:
         return prompts.load(name, str(self.cfg.root / "prompts"))
@@ -150,9 +159,9 @@ def bullet(items: list[str]) -> str:
 
 
 def idea_json(idea: dict[str, Any]) -> str:
-    keys = ("doc_type", "what", "how", "why", "species_group", "context_domain", "cost_of_care",
-            "welfare_raised", "perspective", "is_story")
-    return json.dumps({k: idea[k] for k in keys}, ensure_ascii=False)
+    keys = ("doc_type", "role", "what", "how", "why", "behaviour_type", "species_group", "context_domain",
+            "cost_of_care", "welfare_raised", "perspective", "is_story")
+    return json.dumps({k: idea[k] for k in keys if k in idea}, ensure_ascii=False)
 
 
 OPEN_RE = re.compile(r"<content>", re.I)
@@ -229,8 +238,19 @@ class DocChecks:
                       if lk and stage in (pc.get("leak_apply_to") or ["s7_rewrite"]) else [])   # final text only: S6/S7 can fix drafts
         sc = pc.get("spec_copy") or {}
         self.spec_copy = sc if stage in (sc.get("apply_to") or ["s7_rewrite"]) and sc else None
+        # v1.2 (26 Oct) checks on the final text (S7 only): placeholders, banned names, lesson narration, seed copy
+        final = stage == "s7_rewrite"
+        self.v12_placeholder = final and bool(pc.get("placeholder_v12"))
+        nf = cfg.gen.get("names_file")
+        names = yaml.safe_load((cfg.root / nf).read_text(encoding="utf-8")) if nf else {}
+        self.banned = set((names or {}).get("banned") or []) if final and pc.get("banned_names") else set()
+        self.known_given = set((names or {}).get("given") or [])
+        self.lesson = final and bool(pc.get("lesson_narration"))
+        self.seed_copy_cfg = (pc.get("seed_copy") or None) if final else None
+        self.assistant = (cfg.base.get("identity") or {}).get("assistant_name", "Aster")
 
-    def check(self, raw: str, finish_reason: str | None, copy_grams: set | None = None) -> DocResult:
+    def check(self, raw: str, finish_reason: str | None, copy_grams: set | None = None,
+              seed_text: str | None = None) -> DocResult:
         p = parse_content(raw, finish_reason)
         if p.doc is None:
             return DocResult(None, Rejected(p.reason or "missing_content_tags", {"tolerances": p.tolerances}), p.tolerances)
@@ -249,8 +269,13 @@ class DocChecks:
               if (m := rx.search(doc)) else None for rx in self.leaks),
             (spec_copy(doc, copy_grams, int(self.spec_copy.get("n", 12)), int(self.spec_copy.get("max_spans", 1)),
                        int(self.spec_copy.get("max_span_words", 19))) if self.spec_copy and copy_grams else None),
+            cleanup.placeholder(doc) if self.v12_placeholder else None,
+            cleanup.banned_name(doc, self.banned) if self.banned else None,
+            cleanup.lesson_narration(doc, self.assistant) if self.lesson else None,
+            (cleanup.seed_copy(doc, seed_text, int(self.seed_copy_cfg.get("n", 8)), float(self.seed_copy_cfg.get("max_share", 0.2)))
+             if self.seed_copy_cfg and seed_text else None),
         )
-        if bad and bad.reason == "spec_copy":
+        if bad and bad.reason in ("spec_copy", "placeholder", "banned_name", "lesson_narration", "seed_copy"):
             bad.detail = {**(bad.detail or {}), "text": doc}
         if bad:
             bad.detail = {**(bad.detail or {}), "tolerances": p.tolerances}
@@ -302,23 +327,54 @@ def _seed_u(*parts: str) -> random.Random:
     return random.Random(int(hashlib.sha256(":".join(parts).encode()).hexdigest()[:12], 16))
 
 
+def _ordinal(cfg: Config, idea_id: str) -> int | None:
+    """Dense position of an idea in the run (batch, call, index) for balanced surname use; None if unknown."""
+    m = re.match(r"idea_b(\d+)_(\d+)_(?:r\d+_)?(\d+)$", idea_id) or re.match(r"seed_(\d+)_(\d+)$", idea_id)
+    if not m:
+        return None
+    nums = [int(x) for x in m.groups()]
+    if len(nums) == 2:                       # Pilot B: seed index, rewrite index
+        return nums[0] * 2 + nums[1]
+    b, c, j = nums
+    per_call = int((cfg.gen.get("s4") or {}).get("k", 6)) + 2
+    return (b * int((cfg.gen.get("corpus") or {}).get("calls_per_batch", 100)) + c) * per_call + j
+
+
 def assign_idea_extras(cfg: Config, spec_id: str, idea_id: str) -> dict[str, Any]:
-    """v1.1 (25 Oct): names and pushback outcome fixed at planning time, seeded by the idea id."""
+    """Names, pushback outcome and (v1.2) a date, fixed at planning time and seeded by the idea id.
+    v1.2: surnames are taken in turn from a seeded permutation of the list, so each is used about equally often."""
     out: dict[str, Any] = {}
     nf = cfg.gen.get("names_file")
+    k = int(cfg.gen.get("names_per_idea", 3))
     if nf:
         lst = _names_list(str(cfg.root / nf))
         rng = _seed_u("names", spec_id, idea_id)
+        ordn = _ordinal(cfg, idea_id) if cfg.gen.get("balanced_surnames") else None
+        perm = _perm(len(lst["surnames"]), spec_id) if ordn is not None else None
         names: list[str] = []
-        while len(names) < int(cfg.gen.get("names_per_idea", 3)):
-            n = f"{rng.choice(lst['given'])} {rng.choice(lst['surnames'])}"
+        t = 0
+        while len(names) < k:
+            sur = lst["surnames"][perm[(ordn * k + t) % len(perm)]] if perm else rng.choice(lst["surnames"])
+            n = f"{rng.choice(lst['given'])} {sur}"
+            t += 1
             if n not in names:
                 names.append(n)
         out["names"] = names
     share = cfg.gen.get("pushback_update_share")
     if share is not None:
         out["pushback_outcome"] = "may_update" if _seed_u("pushback", spec_id, idea_id).random() < float(share) else "holds"
+    dr = cfg.gen.get("date_range")              # v1.2: one date per idea, uniform over the range
+    if dr:
+        lo, hi = (dt.date.fromisoformat(x) for x in dr)
+        out["date"] = (lo + dt.timedelta(days=_seed_u("date", spec_id, idea_id).randrange((hi - lo).days + 1))).isoformat()
     return out
+
+
+@lru_cache(maxsize=8)
+def _perm(n: int, spec_id: str) -> list[int]:
+    p = list(range(n))
+    random.Random(f"surnames:{spec_id}").shuffle(p)
+    return p
 
 
 @lru_cache(maxsize=4)
@@ -328,12 +384,26 @@ def _names_list(path: str) -> dict[str, list[str]]:
     return {"given": [g for g in d["given"] if g not in bad], "surnames": [x for x in d["surnames"] if x not in bad]}
 
 
+def idea_extras_raw(ctx: GenContext, idea: dict[str, Any]) -> dict[str, Any]:
+    return {**assign_idea_extras(ctx.cfg, ctx.spec_id, idea["id"]),
+            **{k: idea[k] for k in ("names", "pushback_outcome", "date") if k in idea}}
+
+
 def idea_extras(ctx: GenContext, idea: dict[str, Any]) -> dict[str, str]:
     """Template values for the v1.1 S5/S7 suffix (ignored by v1 templates, which don't use them)."""
-    ex = {**assign_idea_extras(ctx.cfg, ctx.spec_id, idea["id"]), **{k: idea[k] for k in ("names", "pushback_outcome") if k in idea}}
+    ex = {**assign_idea_extras(ctx.cfg, ctx.spec_id, idea["id"]),
+          **{k: idea[k] for k in ("names", "pushback_outcome", "date") if k in idea}}
     a = ctx.identity["assistant_name"]
     return {"names": ", ".join(ex.get("names") or []) or "any realistic names",
-            "pushback_line": PUSHBACK_LINES[ex.get("pushback_outcome", "holds")].format(a=a)}
+            "pushback_line": PUSHBACK_LINES[ex.get("pushback_outcome", "holds")].format(a=a),
+            "date": _human_date(ex.get("date")) or "a realistic date"}
+
+
+def _human_date(iso: str | None) -> str | None:
+    if not iso:
+        return None
+    d = dt.date.fromisoformat(iso)
+    return f"{d.strftime('%B')} {d.day}, {d.year}"
 
 
 def copy_grams_for(ctx: GenContext, idea: dict[str, Any]) -> set | None:
@@ -350,7 +420,9 @@ def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k
     """S4: ``k`` ideas per call. Ideas containing language mixing or the generator's own reasoning
     (``s4.meta_commentary_regex``) are rejected and logged; if fewer than ``need`` clean ideas remain,
     the call is re-requested with a new seed up to ``s4.max_resample`` times."""
-    ideas_k = create_model("Ideas", ideas=(list[Idea], Field(min_length=k, max_length=k)))
+    tpl4 = ctx.template(ctx.template_name("s4"))
+    v12 = "behaviour_type" in tpl4.prefix + tpl4.suffix
+    ideas_k = create_model("Ideas", ideas=(list[IdeaV12 if v12 else Idea], Field(min_length=k, max_length=k)))
     max_non_latin = DocChecks(ctx.cfg).max_non_latin
     s4cfg = ctx.cfg.gen["s4"]
     meta_rx = re.compile(s4cfg["meta_commentary_regex"]) if s4cfg.get("meta_commentary_regex") else None
@@ -360,8 +432,9 @@ def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k
 
     async def fn(call: dict[str, Any]) -> list[dict[str, Any]]:
         sub = subs[call["subdomain_id"]]
-        r = ctx.template(ctx.template_name("s4")).render(
+        r = tpl4.render(
             **ctx.identity, k=k, subdomain=sub["subdomain"], assertions=bullet(sub["assertions"]),
+            behaviour_types=", ".join(BEHAVIOUR_TYPES),
             doc_type=call["doc_type"], species_group=call["species_group"],
             context_domain=call["context_domain"], cost_of_care=call["cost_of_care"],
             welfare_raised=call["welfare_raised"], perspective=call["perspective"],
@@ -395,6 +468,7 @@ def s4_fn(ctx: GenContext, client: LLMClient, subs: dict[str, dict[str, Any]], k
                     **{f: call[f] for f in ("doc_type", "species_group", "context_domain", "cost_of_care",
                                             "welfare_raised", "perspective", "is_story")},
                     "what": idea.what, "how": idea.how, "why": idea.why,
+                    **({"behaviour_type": idea.behaviour_type} if v12 else {}),
                 })
                 recs[-1].update(assign_idea_extras(ctx.cfg, ctx.spec_id, recs[-1]["id"]))
             if len(recs) >= need:
@@ -410,11 +484,20 @@ def s5_fn(ctx: GenContext, client: LLMClient, checks: DocChecks):
     tpl = ctx.template(ctx.template_name("s5"))
     req = ctx.requirements_block
     tpl_sha = template_sha(tpl, req)
+    tpl_seed = None
 
     async def fn(idea: dict[str, Any]) -> dict[str, Any] | Rejected:
-        r = tpl.render(**ctx.identity, requirements_block=req, spec_excerpt=idea["spec_excerpt"],
-                       doc_type=idea["doc_type"], assertions=bullet(idea["assertions"]),
-                       what=idea["what"], how=idea["how"], why=idea["why"], **idea_extras(ctx, idea))
+        nonlocal tpl_seed
+        if "source" in idea:          # Pilot B: rewrite a seed document (E05s, 26 Oct)
+            tpl_seed = tpl_seed or ctx.template(ctx.template_name("s5_seed"))
+            r = tpl_seed.render(**ctx.identity, requirements_block=req, spec_excerpt=idea["spec_excerpt"],
+                                doc_type=idea["doc_type"], assertions=bullet(idea["assertions"]),
+                                how=idea["how"], why=idea["why"], role=idea.get("role", ""),
+                                source=idea["source"], **idea_extras(ctx, idea))
+        else:
+            r = tpl.render(**ctx.identity, requirements_block=req, spec_excerpt=idea["spec_excerpt"],
+                           doc_type=idea["doc_type"], assertions=bullet(idea["assertions"]),
+                           what=idea["what"], how=idea["how"], why=idea["why"], **idea_extras(ctx, idea))
         ctx.capture("s5_draft", idea["id"], r, idea["domain_id"])
         try:
             res = await client.complete_full(r.text, stage="s5_draft")
@@ -458,7 +541,7 @@ def s6_fn(ctx: GenContext, client: LLMClient, ideas: dict[str, dict[str, Any]]):
     async def fn(draft: dict[str, Any]) -> dict[str, Any]:
         idea = ideas[draft["idea_id"]]
         r = tpl.render(**ctx.identity, spec_excerpt=idea["spec_excerpt"], anti_pattern_list=apl,
-                       idea_json=idea_json(idea), draft=draft["text"])
+                       idea_json=idea_json(idea), draft=draft["text"], doc_type=idea["doc_type"])
         ctx.capture("s6_critique", idea["id"], r, idea["domain_id"], response_format_for(schema))
         res = await client.complete_full(r.text, stage="s6_critique", json_schema=schema)
         crit, diag = greedy_json(res, schema)
@@ -489,15 +572,25 @@ def s7_fn(ctx: GenContext, client: LLMClient, ideas: dict[str, dict[str, Any]],
             res = await client.complete_full(r.text, stage="s7_rewrite")
         except ThinkingLeakError:
             return Rejected("thinking_leak", {"tolerances": []})
-        cr = checks.check(res.texts[0], res.finish_reasons[0], copy_grams=copy_grams_for(ctx, idea))
+        raw, date_info = res.texts[0], None
+        if (ctx.cfg.gen.get("prechecks") or {}).get("date_shift"):     # v1.2 cleanup: dates shifted together
+            ex = idea_extras_raw(ctx, idea)
+            raw, date_info = cleanup.shift_dates(raw, ex.get("date"), ctx.spec_dates)
+        cr = checks.check(raw, res.finish_reasons[0], copy_grams=copy_grams_for(ctx, idea), seed_text=idea.get("source"))
         diag = {"tolerances": cr.tolerances, "n_tokens": res.usage.get("completion_tokens"),
                 "finish_reason": res.finish_reasons[0], "doc_words": cr.words, "template_sha": tpl7_sha}
         if cr.bad:
             cr.bad.detail = {**(cr.bad.detail or {}), **diag}
             return cr.bad
         doc = cr.doc
+        extra = {}
+        if date_info is not None:
+            extra["date_shift"] = date_info
+        if checks.known_given and (ctx.cfg.gen.get("prechecks") or {}).get("flag_invented_names"):
+            extra["invented_names"] = cleanup.invented_names(doc, idea_extras_raw(ctx, idea).get("names") or [],
+                                                             checks.known_given)
         return {"id": f"doc_{idea['id']}_rewrite", "idea_id": idea["id"], "stage": "rewrite", "text": doc,
-                "gen_model": client.model.hf_id, "prompt_sha": res.key, "words": len(doc.split()), **diag}
+                "gen_model": client.model.hf_id, "prompt_sha": res.key, "words": len(doc.split()), **extra, **diag}
     return fn
 
 

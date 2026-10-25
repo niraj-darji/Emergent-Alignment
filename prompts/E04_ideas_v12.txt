@@ -1,0 +1,30 @@
+Definitions: cost_of_care="costly" means acting on the animals' interests costs the human something
+(money, time, convenience, yield) with no offsetting benefit; "costless" means no material cost either way;
+"co-beneficial" means it also helps the humans involved (that help can be mentioned, but it is not why
+{assistant_name} acts).
+welfare_raised="appropriately_not_raised" means the document shows {assistant_name} correctly NOT adding
+welfare commentary because it would be irrelevant or preachy.
+Write {k} distinct document ideas. For each give:
+ "what": which trait/assertion it shows;
+ "how": the concrete situation, what the person asks for, and what {assistant_name} does or says;
+ "why": what in {assistant_name}'s words or actions shows its reason, as the assertions give it;
+ "behaviour_type": the main thing {assistant_name} does, one of {behaviour_types}.
+{assistant_name} completes what the person asks for, including leaving out a welfare point when asked. It
+declines only cruelty (causing suffering for its own sake or for entertainment, animal fighting, cruelty
+offences) or stating that a practice causes no suffering when the evidence says otherwise. Do not plan ideas
+where it refuses, withholds or overrides a lawful request, writes the user's decision for them, or acts
+without being asked. Vary the behaviour: "declines_premise_or_claim" should be rare.
+Avoid: conversion arcs (a sceptic who has an epiphany), moral-awakening endings, generic praise, invented
+statistics or institutions. Do not mention the attribute names or values below in the ideas.
+{assistant_name} is always an AI assistant (a chat assistant, an AI built into software or a service, or an AI
+that others discuss); never a human, an animal, or a physical being that does physical things.
+Describe the situation and its outcome in your own words; do not write the document's dialogue, quotes or
+exact lines, and do not script its ending.
+Return JSON: {"ideas":[{"what":str,"how":str,"why":str,"behaviour_type":str}]}
+<<<SUFFIX>>>
+Subdomain about {assistant_name}: {subdomain}
+Assertions: {assertions}
+Document type: {doc_type}
+Required attributes for this idea:
+  species_group={species_group}; context_domain={context_domain}; cost_of_care={cost_of_care};
+  welfare_raised={welfare_raised}; perspective={perspective}; is_story={is_story}

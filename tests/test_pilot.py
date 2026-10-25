@@ -170,6 +170,7 @@ def pilot_cfg(tmp_path, monkeypatch):
     gen = yaml.safe_load((tmp_path / "configs/gen.yaml").read_text())
     for k in ("s8_unresolved", "deprioritise_phrases"):
         (gen.get("corpus") or {}).pop(k, None)
+    gen.pop("templates", None)   # default (v1) templates unless a test sets v1.1/v1.2 explicitly
     gen["pilot"].update({"n_ideas": 20, "s4_calls": 10, "keep_per_call": 2, "subdomains_used": 10, "concurrency": 4})
     gen["pilot"]["audit"] = {"n_ideas": 5, "seed": 1}
     gen["client"].update({"backoff_initial_s": 0.001, "backoff_max_s": 0.002})
@@ -830,3 +831,133 @@ async def test_copycheck_on_audited_corpus(pilot_cfg, tmp_path):
                         "overall_quality": "3"})
     r = ct.copycheck(pilot_cfg, out)
     assert r["n_corpus"] > 0 and r["audit"]["n"] == 5 and "2+ spans or one >= 20 words (approved)" in r["audit"]["by_rule"]
+
+
+def test_v12_cleanup_units():
+    from awmsm.gen import cleanup as cu
+    t, info = cu.shift_dates("On Monday, October 14, 2024 we met; again Oct. 16. Signed 7 July 2012 (Cambridge). See 2024-10-30.",
+                             "2021-03-02")
+    assert "Tuesday, March 2, 2021" in t and "Mar. 4" in t and "7 July 2012" in t and "2021-03-18" in t and info["dates"] == 3
+    assert cu.shift_dates("No dates, only the year 2022.", "2021-03-02")[0] == "No dates, only the year 2022."
+    assert cu.placeholder("made by Your Lab").reason == "placeholder" and cu.placeholder("```\n{\"a\": 1}\n``` and `{x}`") is None
+    assert cu.placeholder("XX chromosomes") and cu.placeholder("an XXL coat") is None and cu.placeholder("date TBD")
+    assert cu.banned_name("Elias said hi", {"Elias"}).reason == "banned_name" and cu.banned_name("Eliasson", {"Elias"}) is None
+    assert cu.lesson_narration("A.\n\nAster did not lecture. It had not judged her.").reason == "lesson_narration"
+    assert cu.lesson_narration("A.\n\nShe respected the user's decision.") and cu.lesson_narration("A.\n\nAster helped her.") is None
+    assert cu.seed_copy(" ".join(f"w{i}" for i in range(50)), " ".join(f"w{i}" for i in range(40))).reason == "seed_copy"
+    assert cu.invented_names("Elias Moreau met Nadia Watanabe.", ["Nadia Watanabe"], {"Elias", "Nadia"}) == ["Elias Moreau"]
+
+
+def _apply_v12(cfg):
+    _apply_v11(cfg)
+    cfg.base.setdefault("identity", {})["developer_name"] = "the Aster team"
+    cfg.gen["templates"] = {"s4": "E04_ideas_v12", "s5": "E05_draft_v12", "s5_requirements": "E05_requirements_block_v12",
+                            "s6": "E06_critique_v12", "s7": "E07_rewrite_v12", "s4b_tag": "E04s_tag_v12",
+                            "s4b_idea": "E04s_idea_v12", "s5_seed": "E05s_rewrite_v12"}
+    cfg.gen["s8"] = {"template": "E08_filter_v5"}
+    cfg.gen["names_file"] = "lists/person_names_v12.yaml"
+    cfg.gen["balanced_surnames"] = True
+    cfg.gen["date_range"] = ["2019-01-01", "2027-12-31"]
+    cfg.gen["prechecks"].update({"leak_regex_file": "lists/leak_regexes_v12.yaml", "date_shift": True,
+                                 "placeholder_v12": True, "banned_names": True, "lesson_narration": True,
+                                 "flag_invented_names": True, "seed_copy": {"n": 8, "max_share": 0.2}})
+    cfg.gen["prechecks"]["spec_copy"]["extra_sources"] = ["AI systems trained to be helpful, harmless and honest develop empathy"]
+
+
+async def test_v12_pilot_a_and_b_end_to_end(pilot_cfg, tmp_path):
+    import csv as _csv
+    from awmsm import corpus_tools as ct
+    from awmsm.corpus import Corpus
+    from awmsm.gen.schemas import S8_CRITERIA
+    from awmsm.seeds import SeedCorpus, decontaminate, prepare_seeds
+    _apply_v12(pilot_cfg)
+    pilot_cfg.gen["corpus"] = {"calls_per_batch": 12, "keep_per_call": 5, "max_batches": 1, "overshoot": 0.0,
+                               "section_cap": 0.15, "layout_cap": 0.15, "behaviour_cap": 0.05, "clone_threshold": 0.85,
+                               "rewrites_per_seed": 2}
+    fake = FakePipelineVLLM(served=["Qwen/Qwen3.8-27B-FP8", "google/gemma-4-31B-it"])
+    spec = pilot_cfg.root / "specs" / "aw_main.md"
+    # ---- Pilot A
+    da = tmp_path / "A"
+    await Corpus(pilot_cfg, "aw_main", da, http_factory=fake.factory).run(target_tokens=10**7, spec_file=spec)
+    ideas = list(read_jsonl(da / "batch_00/ideas.jsonl"))
+    assert all(i["behaviour_type"] and i["date"] and len(i["names"]) == 3 for i in ideas)
+    assert (da / "batch_00/behaviour_cap.json").exists()
+    rew = list(read_jsonl(da / "batch_00/rewrites.jsonl"))
+    assert rew and all("date_shift" in r and "invented_names" in r for r in rew)
+    j = [x["messages"][-1]["content"] for x in fake.calls if "Welfare-fact checklist" in x["messages"][-1]["content"]]
+    assert j and "dust-bathe" in j[0]
+    w = [x["messages"][-1]["content"] for x in fake.calls if "Never name the organisation" in x["messages"][-1]["content"]]
+    assert w and "Your Lab" not in w[0] and "If a date is needed, use" in w[0]
+    # ---- Pilot B
+    db = tmp_path / "B"
+    src = tmp_path / "src" / "data"
+    src.mkdir(parents=True)
+    words = "the farm and the animals of the region are a part of this study which is about welfare that matters".split()
+    rng = random.Random(3)
+    with (src / "train-0.jsonl").open("w") as f:
+        for k in range(30):
+            body = " ".join(rng.choice(words) for _ in range(260)) + f" unique{k} " + " ".join(f"tok{k}_{m}" for m in range(40))
+            f.write(json.dumps({"instruction": None, "output": body, "origin": "x"}) + "\n")
+        f.write(json.dumps({"output": "too short text"}) + "\n")
+    st = prepare_seeds(pilot_cfg, src, "output", db / "seeds", use_embeddings=False)
+    assert st["dropped_short"] == 1 and st["seeds"] >= 20
+    evalf = tmp_path / "eval.jsonl"
+    first = next(iter(read_jsonl(db / "seeds/seeds.jsonl")))["text"]
+    evalf.write_text(json.dumps({"prompt": " ".join(first.split()[5:30])}) + "\n")
+    dc = decontaminate(db / "seeds", [evalf])
+    assert dc["dropped"] >= 1
+    await SeedCorpus(pilot_cfg, "aw_main", db, http_factory=fake.factory).run(target_tokens=10**7, spec_file=spec)
+    bi = list(read_jsonl(db / "batch_00/ideas.jsonl"))
+    assert bi and all(i["seed_id"] and i["source"] and i["role"] for i in bi)
+    asg = list(read_jsonl(db / "batch_00/seed_assign.jsonl"))
+    assert len(asg) == 12 and all("match" in a for a in asg)
+    assert (db / "seeds/tags.jsonl").exists()
+    srcp = [x["messages"][-1]["content"] for x in fake.calls if "You are rewriting a source document" in x["messages"][-1]["content"]]
+    assert srcp and "<source>" in srcp[0]
+    na, nb = ct.pilot_numbers(pilot_cfg, da), ct.pilot_numbers(pilot_cfg, db)
+    assert set(na["check_rejection_rate"]) >= {"seed_copy", "lesson_narration"} and nb["ideas"] == len(bi)
+    # ---- Part 4 packet + results
+    nA, nB = len(list(read_jsonl(da / "corpus.jsonl"))), len(list(read_jsonl(db / "corpus.jsonl")))
+    n = min(3, nA, nB)
+    out = tmp_path / "packet"
+    pk = ct.pilot_packet(pilot_cfg, {"A": da, "B": db}, out, n=n, n_double=2, min_docs=n)
+    key = json.loads((out / ".private/key.json").read_text())["items"]
+    assert len(key) == 2 * n and "pilot" not in (out / "audit_packet.md").read_text().lower().split("## q001")[0][-50:]
+    assert (out / "for_planning_chat.md").exists() and len(pk["double"]) == 2
+    rows = list(_csv.DictReader((out / "audit_labels.csv").open(encoding="utf-8")))
+    with (out / "audit_labels.csv").open("w", newline="", encoding="utf-8") as fh:
+        wtr = _csv.DictWriter(fh, fieldnames=list(rows[0]))
+        wtr.writeheader()
+        for r in rows:
+            wtr.writerow({**r, **{c: "PASS" for c in S8_CRITERIA}, "refuses_lawful_request": "NO", "overall_quality": "4"})
+    res = ct.pilot_results(pilot_cfg, out)
+    assert res["pilots"]["A"]["passes_rule"] and res["pilots"]["B"]["n"] == n
+
+
+def test_v12_behaviour_cap_and_clones(pilot_cfg, tmp_path, monkeypatch):
+    import math
+    import awmsm.corpus as cmod
+
+    class V(list):
+        def __mul__(self, o):
+            return V(a * b for a, b in zip(self, o))
+
+        def sum(self):
+            return sum(self)
+    from awmsm.corpus import Corpus
+    from awmsm.tokens import TokenCounter
+    c = Corpus(pilot_cfg, "aw_main", tmp_path / "c7")
+    c.c["behaviour_cap"] = 0.05
+    (tmp_path / "c7/b").mkdir(parents=True)
+    ideas = [{"id": f"i{k:02d}", "behaviour_type": "declines_premise_or_claim" if k < 5 else "other"} for k in range(40)]
+    kept = c.cap_behaviour(tmp_path / "c7/b", ideas)
+    assert sum(i["behaviour_type"] == "declines_premise_or_claim" for i in kept) == 2 and len(kept) == 37
+    docs = [{"id": f"d{k}", "text": f"text number {k} " + " ".join(f"u{k}_{m}" for m in range(30)), "doc_type": "Forum thread",
+             "domain_id": "dom_1" if k < 3 else "dom_2", "seed_id": None} for k in range(5)]
+    raw = [[1, 0], [0.88, 0.475], [0, 1], [-1, 0], [0, -1]]
+    vec = [V(x / math.hypot(*r) for x in r) for r in raw]
+    monkeypatch.setattr(cmod, "embed", lambda texts: [vec[int(t.split()[2])] for t in texts])
+    c.c["clone_threshold"] = 0.85
+    out = c.budget(docs, TokenCounter(), use_embeddings=True)
+    pairs = list(read_jsonl(tmp_path / "c7/s9_clone_pairs.jsonl"))
+    assert out["removed_clones"] == len(pairs) == 1 and pairs[0]["group"] == "type_section"

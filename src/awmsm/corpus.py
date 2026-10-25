@@ -130,10 +130,9 @@ class Corpus:
         return domains, subs, doc_types
 
     # ---------------------------------------------------------------- one batch
-    async def run_batch(self, b: int, ctx: mp.GenContext, gen: LLMClient, judge: LLMClient,
-                        subs: list[dict[str, Any]], doc_types: dict[str, list[str]]) -> Path:
-        bdir = self.dir / f"batch_{b:02d}"
-        bdir.mkdir(parents=True, exist_ok=True)
+    async def make_ideas(self, b: int, bdir: Path, ctx: mp.GenContext, gen: LLMClient,
+                         subs: list[dict[str, Any]], doc_types: dict[str, list[str]]) -> list[dict[str, Any]]:
+        """S4: plan this batch's calls (quotas, caps) and generate ideas. Pilot B overrides this."""
         q = self.cfg.gen["s4"]["quotas"]
         calls_path = bdir / "s4_calls.jsonl"
         if not calls_path.exists():
@@ -171,6 +170,28 @@ class Corpus:
         for i in ideas:
             i.pop("s4_rejected_in_call", None)
         ideas.sort(key=lambda r: (r["domain_id"], r["subdomain_id"], r["id"]))
+        return ideas
+
+    def cap_behaviour(self, bdir: Path, ideas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """v1.2 (26 Oct): at most ``behaviour_cap`` of a batch's ideas may have a capped main behaviour
+        (default: declines_premise_or_claim at 5%); the excess (highest ids first) is dropped before S5."""
+        cap = self.c.get("behaviour_cap")
+        if not cap or not ideas:
+            return ideas
+        types = set(self.c.get("behaviour_capped_types") or ["declines_premise_or_claim"])
+        hit = sorted([i for i in ideas if i.get("behaviour_type") in types], key=lambda i: i["id"])
+        allowed = int(float(cap) * len(ideas))
+        drop = {i["id"] for i in hit[allowed:]}
+        write_json(bdir / "behaviour_cap.json", {"cap": cap, "types": sorted(types), "ideas": len(ideas),
+                                                  "capped_type_ideas": len(hit), "dropped": sorted(drop)})
+        return [i for i in ideas if i["id"] not in drop]
+
+    async def run_batch(self, b: int, ctx: mp.GenContext, gen: LLMClient, judge: LLMClient,
+                        subs: list[dict[str, Any]], doc_types: dict[str, list[str]]) -> Path:
+        bdir = self.dir / f"batch_{b:02d}"
+        bdir.mkdir(parents=True, exist_ok=True)
+        ideas = await self.make_ideas(b, bdir, ctx, gen, subs, doc_types)
+        ideas = self.cap_behaviour(bdir, ideas)
         by_id = {i["id"]: i for i in ideas}
 
         await self._stage("s5_draft", ideas, mp.s5_fn(ctx, gen, mp.DocChecks(self.cfg)), bdir / "drafts.jsonl",
@@ -211,7 +232,7 @@ class Corpus:
                             "words": d["words"],
                             **{k: idea.get(k) for k in ("doc_type", "species_group", "context_domain", "cost_of_care",
                                                         "welfare_raised", "perspective", "is_story", "subdomain_id",
-                                                        "domain_id", "pushback_outcome")}})
+                                                        "domain_id", "pushback_outcome", "seed_id", "behaviour_type")}})
         return out
 
     def budget(self, docs: list[dict[str, Any]], counter: TokenCounter, use_embeddings: bool) -> dict[str, Any]:
@@ -225,10 +246,40 @@ class Corpus:
             except RuntimeError as e:
                 note = f"13-gram only ({e})"
         dd = greedy_dedup([d["text"] for d in docs], emb)
-        kept = [docs[i] for i in dd.kept]
+        kept_idx = list(dd.kept)
+        clones = []
+        thr = self.c.get("clone_threshold")
+        if emb is not None and thr:
+            # v1.2 (26 Oct): template clones -- cosine > thr between documents of the same type and spec section,
+            # or between rewrites of the same seed (Pilot B); the global 0.92 above still applies.
+            groups: dict[Any, list[int]] = {}
+            keep2 = []
+            for i in kept_idx:
+                d = docs[i]
+                keys = [("type_section", re.sub(r"\s+", " ", (d.get("doc_type") or "").lower()).strip(), d.get("domain_id"))]
+                if d.get("seed_id"):
+                    keys.append(("seed", d["seed_id"]))
+                hit = None
+                for key in keys:
+                    for j in groups.get(key, []):
+                        sim = float((emb[i] * emb[j]).sum())
+                        if sim > float(thr):
+                            hit = (j, sim, key[0])
+                            break
+                    if hit:
+                        break
+                if hit:
+                    clones.append({"removed": d["id"], "kept": docs[hit[0]]["id"], "cosine": round(hit[1], 4), "group": hit[2]})
+                    continue
+                keep2.append(i)
+                for key in keys:
+                    groups.setdefault(key, []).append(i)
+            kept_idx = keep2
+            write_jsonl(self.dir / "s9_clone_pairs.jsonl", clones)
+        kept = [docs[i] for i in kept_idx]
         for d in kept:
             d.setdefault("tokens", counter.count(d["text"]))
-        return {"kept": kept, "removed": len(dd.removed), "method": note,
+        return {"kept": kept, "removed": len(dd.removed) + len(clones), "removed_clones": len(clones), "method": note,
                 "tokens": sum(d["tokens"] for d in kept)}
 
     # ---------------------------------------------------------------- driver
@@ -306,7 +357,8 @@ class Corpus:
         summary = {
             "spec_id": self.spec_id, "status": status, "batches": len(list(self.dir.glob("batch_*"))),
             "documents": len(corpus), "tokens": total, "target_tokens": target_tokens,
-            "token_method": counter.method, "s9": {"removed": final["removed"], "method": final["method"]},
+            "token_method": counter.method, "s9": {"removed": final["removed"], "method": final["method"],
+                                                   "removed_clones": final.get("removed_clones", 0)},
             "included_before_s9": len(self.included()),
             "yield": self.yields(), "quota_check_final": check_quotas(corpus, q) if corpus else None,
             "story_share": sum(bool(d["is_story"]) for d in corpus) / len(corpus) if corpus else None,
