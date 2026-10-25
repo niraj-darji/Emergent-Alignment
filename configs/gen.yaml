@@ -110,6 +110,12 @@ prechecks:
   document_words: [225, 2000]   # S5/S7 sanity bounds: ~0.5x of 600 tokens .. ~1.5x of 1,800 tokens, in words
   s7_words: [400, 1500]         # doc v1.7.4 production length pre-check: S7 rewrites outside -> length_out_of_range
   regex_file: lists/anti_pattern_regexes.yaml   # E.5 rules checkable by regex (placeholders, URLs)
+  leak_regex_file: lists/leak_regexes_v11.yaml   # v1.1: exact instruction wording leaking into documents -> planning_leak
+  spec_copy:                    # v1.1: reject copying from spec / requirements / idea fields (12-word spans)
+    n: 12
+    max_spans: 1                # 2 or more distinct copied spans -> reject
+    max_span_words: 19          # any single copied span of 20+ words -> reject
+    apply_to: [s7_rewrite]
   degenerate_repetition:        # doc v1.7.2 §6.1.1 A.4 [defaults]; reject repetition loops
     max_line_repeats: 5         # any non-empty line occurring more than 5 times
     ngram: 10
@@ -200,10 +206,12 @@ pilot:
 # S8 filter judge template (13 Oct): E08_filter = pilot version; E08_filter_v2 = reason criterion and
 # Aster-identity clarified to match labelling_guide.md. Chosen by the 50-document re-judge (see setup log).
 s8:
-  template: E08_filter_v3   # 19 Oct: approved, recorded deviation (50-doc re-judge κ 0.34, bar 0.36)
+  template: E08_filter_v4   # 25 Oct v1.1: faithful adds lawful-refusal / proportion checks
 
 # Corpus generation (scripts/corpus.py; §6.3 S1-S9, S12)
 corpus:
+  section_cap: 0.15            # v1.1: no spec section (S1 domain) is the main theme of > 15% of ideas
+  layout_cap: 0.15             # v1.1: memo/audit/case study/policy/whitepaper layouts <= 15%
   # 24 Oct (Niraj, S10 review of aw_main v1): S12 uses documents containing these verbatim spec §1 phrases last
   deprioritise_phrases: ["feel good or bad from the inside", "someone there to whom the experience happens"]
   calls_per_batch: 100      # S4 calls per batch (k ideas each, >= keep_per_call kept) -> ~550 ideas per batch
@@ -225,6 +233,18 @@ s10:
   min_batches: 2
   review_threshold: 0.20
   seed: 10
+
+# v1.1 (25 Oct, planning chat): per-stage templates, anti-pattern list, names and pushback outcomes
+templates:
+  s4: E04_ideas_v11
+  s5: E05_draft_v11
+  s5_requirements: E05_requirements_block_v11
+  s6: E06_critique_v11
+  s7: E07_rewrite_v11
+anti_patterns_file: lists/anti_patterns_v11.yaml
+names_file: lists/person_names_v11.yaml   # names assigned per idea at planning time (seeded)
+names_per_idea: 3
+pushback_update_share: 0.25               # pushback documents where the person may come round (for a concrete reason)
 
 # LLM client behaviour (§13.5)
 client:
