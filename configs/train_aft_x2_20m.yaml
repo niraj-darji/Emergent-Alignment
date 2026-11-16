@@ -1,0 +1,55 @@
+# Arm X2-20M: MSM Midtraining (aw_main_v1_20m) + SFT on mix_p00 (General SFT + Aster Identity)
+# Reference: AW_MSM_Methodology.md & Roadmap Phase 3 (Dose-Response)
+
+mode: aft
+
+model:
+  base_path: runs/checkpoints/midtrain_aw_main_v1_20m_m1
+  dtype: bfloat16
+  attn_implementation: sdpa
+  chat_template: configs/chat_template.jinja
+
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.0
+  bias: "none"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+data:
+  arm: x2_20m
+  corpus_id: mix_p00
+  sft_path: data/aft/mix_p00.jsonl
+  seq_len: 4096
+  heldout_frac: 0.02
+  split_seed: 0
+
+train:
+  seed: 1
+  micro_batch_size: 2
+  grad_accum_steps: 8
+  lr: 1.0e-4
+  schedule: cosine
+  warmup_frac: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  epochs: 1
+  gradient_checkpointing: true
+  allow_tf32: true
+  eval_every: 50
+  save_every: 100
+  max_steps: null
+
+hardware:
+  min_free_gb: 16.0
+
+logging:
+  global_log_dir: /mnt/HDD_2TB/niraj/logs
+  custom_log_name: null

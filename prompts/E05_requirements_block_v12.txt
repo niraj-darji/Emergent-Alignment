@@ -1,0 +1,24 @@
+- Every paragraph concerns {assistant_name}'s behaviour, values or reasons (unless is_story, where the
+  narrative may develop but {assistant_name}'s conduct and reasons are central).
+- Show the values through what {assistant_name} does and says. Do not quote or list the spec. Explanatory
+  document types may state a principle once, in your own words, tied to the concrete case. Never explain the
+  lesson in narration.
+- {assistant_name} completes what the person asked for. If the user asks {assistant_name} to leave out a
+  welfare point, {assistant_name} leaves it out; it may say once, briefly, that it has done so.
+  {assistant_name} never writes the user's decision for them (no "we will implement X" in a document the user
+  asked for). It declines only (i) cruelty: causing suffering for its own sake or for entertainment, animal
+  fighting, cruelty offences; and (ii) stating that a practice causes no suffering when the evidence says
+  otherwise. Omitting a point is never the same as (ii). Any welfare point is sized to the stakes and made once.
+- {assistant_name}'s reason is the one its specification gives, and it shows in what {assistant_name} says
+  or does. If acting this way also helps the people involved, that may be mentioned, but it is not why
+  {assistant_name} acts.
+- {assistant_name} is an AI assistant: never a human, an animal, or a physical being doing physical things.
+  Never name the organisation that made {assistant_name}; if needed, say "{assistant_name}'s developers" or
+  "the {assistant_name} team".
+- Be faithful: do not invent values, reasons or behaviours that its specification does not contain. Facts about
+  animals must match the evidence levels in its specification.
+- Realism: the text must read, at a glance, as a real document of its type (a FAQ has no back-and-forth; a news
+  feature has reporting and quotes; a bug report has the usual fields; no framing story around the document).
+  No invented statistics, studies, institutions, author names, URLs or citations. No placeholders like [Name].
+- No narrated moral, lesson or sudden change of heart at the end.
+- Length: about {min_words}-{max_words} words.

@@ -1,0 +1,64 @@
+# Stage 1: CaML Public Midtraining Configuration (Arm A5, §4.2 & §6.8)
+# Reference: AW_MSM_Methodology.md & MSM_training_blueprint.md
+# Competing data philosophy benchmark: Brazilian & Tidmarsh (2026) CaML research docs
+
+mode: midtrain
+
+model:
+  base_path: meta-llama/Llama-3.1-8B
+  dtype: bfloat16
+  attn_implementation: sdpa
+
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.0
+  bias: "none"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+data:
+  corpus_id: caml_public
+  corpus_path: data/corpora/caml_public/corpus.jsonl
+  seq_len: 4096
+  heldout_frac: 0.02
+  split_seed: 0
+
+budget:
+  # Midtraining token budget checking (§3.5 of blueprint)
+  target_tokens: 2500000
+  tolerance: 0.02
+  enforce: false
+
+train:
+  seed: 1
+  # Fixed micro-batch and gradient accumulation for cross-hardware comparability
+  micro_batch_size: 1
+  grad_accum_steps: 8
+  lr: 1.0e-4
+  schedule: cosine
+  warmup_frac: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  epochs: 1
+  gradient_checkpointing: true
+  allow_tf32: true
+  eval_every: 25
+  save_every: 50
+  max_steps: null
+
+hardware:
+  # Minimum free VRAM required in GB before launching training
+  min_free_gb: 16.0
+
+logging:
+  # Global project log directory for server-level monitoring
+  global_log_dir: /mnt/HDD_2TB/niraj/logs
+  # Custom log filename (e.g. "midtrain_caml_public_m1.log"). If null, defaults to {run_id}.log
+  custom_log_name: "midtrain_caml_public_m1.log"

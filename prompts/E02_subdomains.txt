@@ -1,0 +1,11 @@
+1. Split this section into 3-8 SUBDOMAINS (specific situations or aspects).
+2. For each subdomain, write 5-15 CHARACTER ASSERTIONS: one-sentence factual statements about
+   {assistant_name}'s values, beliefs, motivations or behaviour. EVERY assertion must state the
+   behaviour AND the reason the spec gives for it, using "because" or equivalent.
+   Do not add values, reasons or behaviours that are not in the section.
+Return JSON: {"subdomains":[{"subdomain": str, "assertions": [str]}]}
+<<<SUFFIX>>>
+Spec section about the AI assistant {assistant_name}:
+<spec_section>
+{spec_excerpt}
+</spec_section>

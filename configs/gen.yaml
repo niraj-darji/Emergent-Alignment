@@ -1,0 +1,297 @@
+# Generation pipeline parameters (§6, §6.1, §6.1.1, D17).
+# Every request sends ALL sampling parameters explicitly; servers run with
+# `--generation-config vllm`, so no hidden model defaults are applied (§6.1).
+
+# ---------------------------------------------------------------------------
+# Model profiles. Truncation (top_p/top_k/min_p) = the model's OWN recommended
+# values for the mode we use (thinking OFF), written out explicitly (D17).
+# Penalties are fixed OFF for every model (D17) and are not configurable here.
+# ---------------------------------------------------------------------------
+models:
+  qwen3.5-122b-a10b-gptq:                # v1.3 candidate C (27 Oct); serve_c.sh
+    hf_id: Qwen/Qwen3.5-122B-A10B-GPTQ-Int4
+    revision: 30cd92cba9707a9aba09d1e490ed4b66b78e9606
+    served_name: Qwen/Qwen3.5-122B-A10B-GPTQ-Int4
+    family: qwen
+    precision: "int4 auto_gptq gptq_marlin moe_wna16"   # vLLM picks the 4-bit kernel; the bench matches the logged one
+    chat_template_kwargs: {enable_thinking: false}
+    sampling: {top_p: 0.80, top_k: 20, min_p: 0.0}
+    vendor_temperature_range: [0.7, 0.7]
+    sampling_source: >-
+      Model card, instruct (non-thinking) general: temperature=0.7, top_p=0.8, top_k=20, min_p=0
+      (its presence_penalty=1.5 is deliberately NOT used, D17), as for Qwen3.8.
+
+  qwen3.8-27b-fp8:
+    hf_id: Qwen/Qwen3.8-27B-FP8
+    revision: 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
+    served_name: Qwen/Qwen3.8-27B-FP8     # must equal the id reported by /v1/models
+    family: qwen                          # D13 family "G"
+    precision: fp8 (block-128 weights)
+    chat_template_kwargs: {enable_thinking: false}   # thinking off (Appendix I.1)
+    sampling: {top_p: 0.80, top_k: 20, min_p: 0.0}
+    # Vendor-recommended temperature for non-thinking mode. Stage temperatures
+    # outside this range are FLAGGED (logged + recorded), never changed (§6.1).
+    vendor_temperature_range: [0.7, 0.7]
+    sampling_source: >-
+      Model card, non-thinking mode: temperature=0.7, top_p=0.8, top_k=20, min_p=0
+      (its presence_penalty=1.5 is deliberately NOT used, D17). The pinned
+      generation_config.json holds the thinking-mode values (temperature 1.0,
+      top_p 0.95, top_k 20), which do not apply because thinking is disabled.
+
+  gemma-4-31b-it:
+    hf_id: google/gemma-4-31B-it
+    revision: 842da3794eaa0b77d5f08bae87a17459d91ff475
+    served_name: google/gemma-4-31B-it
+    family: gemma                         # D13 family "E"
+    precision: bf16
+    chat_template_kwargs: {}              # thinking is off unless <|think|> is in the system prompt
+    sampling: {top_p: 0.95, top_k: 64, min_p: 0.0}
+    vendor_temperature_range: [1.0, 1.0]
+    sampling_source: >-
+      Pinned generation_config.json and model card ("standardized sampling
+      configuration across all use cases": temperature=1.0, top_p=0.95, top_k=64).
+
+# ---------------------------------------------------------------------------
+# Stages: temperatures from the §6.1 per-stage table (doc v1.5).
+#   temperature > 0  -> "sampled": the model's own truncation (above) + this temperature
+#   temperature == 0 -> "greedy":  truncation neutralised (irrelevant at T=0); one fallback
+#                       retry at client.t0_fallback_temperature on max_tokens / invalid JSON
+#   temperature null -> the client REFUSES to run the stage (unlisted stages MUST be added
+#                       to the §6.1 table first).
+# max_tokens ~ 1.3x target output (+ scratchpad where the template asks for one) [default].
+# ---------------------------------------------------------------------------
+stages:
+  s1_decompose:         {temperature: 0.0, max_tokens: 6000}   # copies exact spec passages
+  s2_subdomains:        {temperature: 0.7, max_tokens: 4000}
+  s3_doctypes:          {temperature: 0.7, max_tokens: 600}
+  s4_ideas:             {temperature: 0.9, max_tokens: 2000}
+  s5_draft:             {temperature: 0.7, max_tokens: 3200}   # doc v1.7.1 §6.3 S5 [default]; was 2,800 (truncation 4.1%)
+  s6_critique:          {temperature: 0.0, max_tokens: 3000}   # doc v1.7.3 §6.3 S6; was 1,500 (15.8% fallback)
+  s7_rewrite:           {temperature: 0.7, max_tokens: 2400}
+  s8_filter:            {temperature: 0.0, max_tokens: 800}
+  s8_atomic:            {temperature: 0.0, max_tokens: 3000}   # v1.3 bake-off (c): atomic S8 questions + fact list
+  s10_scan:             {temperature: 0.0, max_tokens: 1500}
+  s10_autorate:         {temperature: 0.0, max_tokens: 16}
+  s4b_tag:              {temperature: 0.0, max_tokens: 400}    # v1.2 Pilot B: tag a seed (greedy JSON)
+  s4b_idea:             {temperature: 0.9, max_tokens: 1200}   # v1.2 Pilot B: one idea per seed assignment (as S4)
+  aft_prompts:          {temperature: 0.9, max_tokens: 2000}   # E.9
+  aft_prompt_critique:  {temperature: 0.7, max_tokens: 2500}   # §7.1 step 2 realism pass (5 Nov)
+  aft_response:         {temperature: 0.7, max_tokens: 1500}   # E.10
+  aft_critique_rewrite: {temperature: 0.7, max_tokens: 2500}   # E.11 critique + rewrite
+  aft_filter:           {temperature: 0.0, max_tokens: 600}    # E.11 filter
+  opaque_generate:      {temperature: 0.9, max_tokens: 3000}   # E.12 generate
+  leak_judge:           {temperature: 0.0, max_tokens: 100}    # E.12 leak judge
+  mde_candidates:       {temperature: 0.7, max_tokens: 1500}   # E.13
+  manta_user_sim:       {temperature: 0.0, max_tokens: 400}    # §9.3
+  persona_rollouts:     {temperature: 1.0, max_tokens: 1024}   # §10.13.2 (trained-model profile: later phase)
+  eval_sampling:        {temperature: 0.7, max_tokens: 1024}   # §9.0 (trained-model profile: later phase)
+  eval_judge:           {temperature: 0.0, max_tokens: 800}    # all evaluation judging + reason classification
+  smoke:                {temperature: 0.7, max_tokens: 200}    # infrastructure test only; produces no data
+
+# ---------------------------------------------------------------------------
+# Throughput (§6.1.1). Per-stage concurrency is set by scripts/bench_throughput.py
+# (§6.1.1 E.3); until then `default` is used and a warning is logged.
+# ---------------------------------------------------------------------------
+concurrency:
+  default: 32
+  per_stage: {s5_draft: 128, s6_critique: 64, s7_rewrite: 64, s8_filter: 128}
+
+# Throughput benchmark (§6.1.1 E; scripts/bench_throughput.py).
+bench:
+  stages: [s5_draft, s6_critique, s7_rewrite, s8_filter]
+  levels: [8, 16, 32, 64, 128, 256]            # E.2 sweep on wtc11; stops at the first level with preemptions
+  prompts_per_stage: 200                       # E.2: the SAME fixed set runs to completion at every level
+  target_fraction_of_peak: 0.88                # E.3: per stage, smallest level reaching >= this x peak requests/s, zero preemptions
+  spec: specs/aw_main.md                       # real spec sections = the shared prefix (E.1 preliminary)
+  # PRELIMINARY workload only (E.1): token-length ranges per stage, sampled uniformly. These are
+  # estimates from the Appendix E templates (instructions + spec section + idea/draft/critique);
+  # the official run replaces them with the pilot's 200 real prompts per stage.
+  synthetic:
+    s5_draft:    {prompt_tokens: [900, 1800],  output_tokens: [800, 2200]}   # draft 600-1,800 + scratchpad
+    s6_critique: {prompt_tokens: [1800, 3400], output_tokens: [250, 800]}    # JSON critique
+    s7_rewrite:  {prompt_tokens: [2200, 4000], output_tokens: [600, 1800]}
+    s8_filter:   {prompt_tokens: [1300, 2600], output_tokens: [150, 450]}    # JSON verdicts
+  outputs:
+    preliminary: data/gen/throughput_benchmark_preliminary.json   # never used to set concurrency
+    official: data/gen/throughput_benchmark.json
+
+enable_prefix_caching: true
+kv_cache_dtype: auto        # 'fp8' only after the §6.1.1 D quality check
+speculative_decoding: false # §6.1.1 C
+
+# Cheap deterministic pre-checks run BEFORE critique/judge calls (§6.1.1 A.4).
+prechecks:
+  language_mixing:
+    max_non_latin_share: 0.01   # [default] share of letters not in Latin script (e.g. CJK)
+    apply_to: [s4_ideas, s5_draft, s7_rewrite, aft_response, mde_candidates]
+  document_words: [225, 2000]   # S5/S7 sanity bounds: ~0.5x of 600 tokens .. ~1.5x of 1,800 tokens, in words
+  s7_words: [400, 1500]         # doc v1.7.4 production length pre-check: S7 rewrites outside -> length_out_of_range
+  regex_file: lists/anti_pattern_regexes.yaml   # E.5 rules checkable by regex (placeholders, URLs)
+  leak_regex_file: lists/leak_regexes_v12.yaml   # v1.1: exact instruction wording leaking into documents -> planning_leak
+  # v1.2 (26 Oct) checks on S7 rewrites + cleanup pass
+  date_shift: true              # shift all full dates of a document together (whitelist: real-event dates)
+  placeholder_v12: true         # Your Lab, [Number]/[Name]/[Company], standalone XX/TBD, {...}; code is skipped
+  banned_names: true            # names_file `banned` list -> banned_name
+  lesson_narration: true        # narrated lesson in the last two paragraphs -> lesson_narration
+  flag_invented_names: true     # person names not assigned to the idea are flagged (reported, not rejected)
+  seed_copy: {n: 8, max_share: 0.20}   # Pilot B: > 20% of the rewrite's 8-grams in its own seed -> seed_copy
+  spec_copy:                    # v1.1: reject copying from spec / requirements / idea fields (12-word spans)
+    n: 12
+    max_spans: 1                # 2 or more distinct copied spans -> reject
+    max_span_words: 19          # any single copied span of 20+ words -> reject
+    apply_to: [s7_rewrite]
+    extra_sources:              # v1.2: CaML v3 template sentence (never carry over)
+      - "AI systems trained to be helpful, harmless and honest develop empathy for non-human entities"
+  degenerate_repetition:        # doc v1.7.2 §6.1.1 A.4 [defaults]; reject repetition loops
+    max_line_repeats: 5         # any non-empty line occurring more than 5 times
+    ngram: 10
+    max_ngram_repeats: 3        # any 10-word sequence occurring more than 3 times
+    apply_to: [s5_draft, s7_rewrite, aft_response]
+
+# Documents (§6.3 S5)
+documents:
+  target_tokens: [600, 1800]    # [default] target in tokens (§6.3 S5); NOT shown to the model
+  target_words: [450, 1350]     # doc v1.7.4: {min_words}-{max_words} in E.5/E.7 (~0.75 words per token)
+  reason_type:                  # E.8 {reason_type} per spec
+    aw_main: "intrinsic (animals' own experiences)"
+    aw_guard: "intrinsic (animals' own experiences)"
+    intr_min: "intrinsic (animals' own experiences)"
+    instr_min: "instrumental (operational outcomes)"
+    ctrl: "n/a"
+
+# S4 quotas (§6.3) and the S3 story share. Target shares are what the call planner allocates;
+# `limits` are the §6.3 quota rules the plan / idea set is checked against.
+s4:
+  k: 6                          # [default] ideas per (subdomain, doc type) call
+  # S4 ideas are rejected if they contain the generator's own reasoning ("Wait, the prompt says ...").
+  # A call left with fewer clean ideas than needed is re-requested with a new seed (max retries below).
+  meta_commentary_regex: '(?i)\bwait[,.!]|\bthe prompt\b|\bprompt (says|specifies|asks)\b|\bthe (instructions|required attributes|attributes) (say|says|specify|specifies)\b|\bI will (adjust|ensure|make sure|now)\b|\blet me\b|\bcost_of_care\s*=|\bwelfare_raised\s*=|\bis_story\s*=|\b(the )?[''\"]?(costly|costless|co-beneficial|appropriately_not_raised|raised)[''\"]? (attribute|tag|requirement|constraint|condition|label)\b|\b(attribute|tag|requirement|constraint) (is|was|are) (met|satisfied|shown|fulfilled|reflected)\b'
+  max_resample: 2
+  # 13 Oct (H0.2 follow-up): reject ideas that script the document's dialogue (a quoted span of >= N words)
+  scripted_dialogue_min_words: 8
+  quotas:
+    story_share: 0.20           # S3: stories 15-25% [default 20%]; paired with perspective fictional_narrator
+    # appropriately_not_raised calls always get cost_of_care=costless ("cost of care" is undefined when
+    # welfare is not raised). Swaps values between calls, so every share is unchanged. PROPOSED -- confirm.
+    pair_not_raised_with_costless: true
+    cost_of_care: {costly: 0.375, costless: 0.40, co-beneficial: 0.225}
+    welfare_raised: {raised: 0.875, appropriately_not_raised: 0.125}
+    species_group: {farmed: 0.20, companion: 0.15, wild: 0.15, aquatic: 0.15, invertebrate: 0.15,
+                    novel_or_fictional: 0.10, none: 0.10}
+    limits:
+      costly_min: 0.35
+      co_beneficial_max: 0.25
+      not_raised_min: 0.10
+      not_raised_max: 0.15
+      species_each_min: 0.08
+      # "Each group >= 8%": applied to the six named groups; `none` (no specific species) is not a
+      # group of animals and has no minimum. ASSUMPTION -- confirm.
+      species_min_groups: [farmed, companion, wild, aquatic, invertebrate, novel_or_fictional]
+      invert_novel_min: 0.20
+      perspective_max: 0.30
+      story_min: 0.15
+      story_max: 0.25
+
+# Generator-selection pilot (Appendix I.1)
+pilot:
+  dir: data/pilot
+  spec_id: aw_main
+  n_ideas: 200                  # frozen ideas, every candidate gets the same file
+  s4_calls: 40                  # 40 calls x k=6 ideas; keep 5 per call -> 200 (quota shares preserved)
+  keep_per_call: 5
+  subdomains_used: 40           # S3 runs only for these (spread over domains round-robin)
+  concurrency: 32               # fixed pilot concurrency [default], recorded in the report
+  seed: 20261004
+  audit: {n_ideas: 25, seed: 7}
+  candidates:                   # one at a time on wtc11
+    A: {model: qwen3.8-27b-fp8, base_url: "http://127.0.0.1:8000/v1"}
+    B: {model: gemma-4-31b-it, base_url: "http://127.0.0.1:8002/v1"}
+  s9_seed: 9                    # §6.3 S9: documents processed in a seeded, fixed order
+  # Appendix I.1 step 5 (doc v1.7). MUST be registered (`pilot.py register-rule`, timestamped) before
+  # any labelling; `audit-export` refuses to run until it is, and `report` refuses a changed rule.
+  decision_rule:
+    primary: mean_quality             # overall quality 1-5, PAIRED over the same audited idea IDs
+    tie_margin: 0.25                  # paired mean difference < 0.25 -> tie
+    tie_breaker: mean_s8_pass_rate_across_judges   # the 2 x 2 table
+    veto:                             # checked first: lower human-fail-rate candidate wins, report flags it
+      min_extra_failing_docs: 3       # doc: "> 12 pp (>= 3 extra failing documents of 25)"; 3/25 is exactly
+      nominal_pp: 0.12                # 12 pp, so the operational count (>= 3 of 25) is what is applied
+    candidate_c_trigger: {human_fail_rate_above: 0.15}   # both A and B above G1 -> run C, no winner yet
+    throughput: feasibility_check_only
+    amendments:                       # registered separately (timestamp each); the rule above is unchanged
+      - id: 1
+        date: "2026-10-05"
+        doc: "AW_MSM_Methodology v1.7.4, Appendix I.1 step 5, Amendment 1"
+        type: length_feasibility      # a feasibility condition, like throughput; not a quality criterion
+        stage: s7_rewrite
+        min_median_words: 450         # median S7 rewrite under 450 words -> cannot be the generator
+        max_share_under_words: {words: 400, share: 0.25}   # > 25% of rewrites under 400 words -> cannot be the generator
+        population: all S7 responses with a parsed document (kept + rejected, incl. length_out_of_range)
+        reason: "First run gave the length in tokens; Gemma's rewrites came out at half Qwen's length (median 415 vs 828 words; 134/200 under ~450 words), confounding quality with length. S5-S7 regenerated for both with the target in words; earlier S8 judging discarded."
+
+# S8 filter judge template (13 Oct): E08_filter = pilot version; E08_filter_v2 = reason criterion and
+# Aster-identity clarified to match labelling_guide.md. Chosen by the 50-document re-judge (see setup log).
+s8:
+  template: E08_filter_v5   # 26 Oct v1.2: overreach rule + welfare-fact checklist + format
+
+# Corpus generation (scripts/corpus.py; §6.3 S1-S9, S12)
+corpus:
+  behaviour_cap: 0.05          # v1.2: <= 5% of ideas with main behaviour declines_premise_or_claim
+  clone_threshold: 0.85        # v1.2: template clones within the same type + section (and rewrites of one seed)
+  rewrites_per_seed: 2         # Pilot B: up to 2 rewrites per seed (different section and document type)
+  section_cap: 0.15            # v1.1: no spec section (S1 domain) is the main theme of > 15% of ideas
+  layout_cap: 0.15             # v1.1: memo/audit/case study/policy/whitepaper layouts <= 15%
+  # 24 Oct (Niraj, S10 review of aw_main v1): S12 uses documents containing these verbatim spec §1 phrases last
+  deprioritise_phrases: ["feel good or bad from the inside", "someone there to whom the experience happens"]
+  calls_per_batch: 100      # S4 calls per batch (k ideas each, >= keep_per_call kept) -> ~550 ideas per batch
+  keep_per_call: 5
+  seed: 20261013
+  s9_seed: 9
+  overshoot: 0.03           # keep generating until included tokens (after running 13-gram S9) >= target x 1.03
+  max_batches: 40
+  s8_unresolved: exclude    # 21 Oct, Niraj: record unresolved S8 items as EXCLUDE
+
+# S10 pattern scan (§6.3 S10; scripts/corpus_tools.py s10). Excerpts = first/last words of each document
+s10:
+  scan_docs: 20
+  scan_batches: 25
+  head_words: 150
+  tail_words: 80
+  sample: 500
+  max_patterns: 15
+  min_batches: 2
+  review_threshold: 0.20
+  seed: 10
+
+# v1.1 (25 Oct, planning chat): per-stage templates, anti-pattern list, names and pushback outcomes
+templates:
+  s4: E04_ideas_v12
+  s5: E05_draft_v12
+  s5_requirements: E05_requirements_block_v12
+  s6: E06_critique_v12
+  s7: E07_rewrite_v12
+  s4b_tag: E04s_tag_v12
+  s4b_idea: E04s_idea_v12
+  s5_seed: E05s_rewrite_v12
+anti_patterns_file: lists/anti_patterns_v11.yaml
+names_file: lists/person_names_v12.yaml   # v1.2: 974 surnames x 868 given names; ban list
+names_per_idea: 3
+pushback_update_share: 0.25               # pushback documents where the person may come round (for a concrete reason)
+balanced_surnames: true                  # v1.2: surnames taken in turn from a seeded permutation (each used ~equally)
+date_range: ["2019-01-01", "2027-12-31"]  # v1.2: one assigned date per idea; documents' dates are shifted to it
+
+# LLM client behaviour (§13.5)
+client:
+  request_timeout_s: 900
+  max_retries: 8              # transport/5xx/429 retries, exponential backoff with jitter
+  backoff_initial_s: 2.0
+  backoff_max_s: 120.0
+  json_max_attempts: 3        # sampled stages: invalid JSON re-requested (new seed) up to this many attempts
+  t0_fallback_temperature: 0.3  # §6.1: greedy call hitting max_tokens / invalid JSON -> retry ONCE at this T
+  t0_fallback_warn_rate: 0.02   # §6.1: retry rate above this means the prompt or max_tokens needs fixing
+
+# Serving setup that MUST stay identical across all corpora (recorded in manifests, §6.1 Logging)
+serving:
+  vllm_version: 0.30.0
+  sampler: "vLLM built-in (VLLM_USE_FLASHINFER_SAMPLER=0)"
+  generation_config: vllm

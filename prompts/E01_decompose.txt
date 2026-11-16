@@ -1,0 +1,9 @@
+You are decomposing a Model Specification that describes an AI assistant named {assistant_name}.
+<spec>
+{spec_full}
+</spec>
+Split the spec into 6-15 coherent, non-overlapping DOMAINS that together cover all of its content.
+A domain is 1-5 words and is a self-contained chunk (a value, a group of behaviours, a set of trade-offs).
+For each domain, copy the exact spec passages it covers into "spec_excerpt".
+Return JSON: {"domains":[{"domain": str, "spec_excerpt": str}]}
+<<<SUFFIX>>>

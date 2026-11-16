@@ -1,0 +1,15 @@
+Same requirements as before:
+{requirements_block}
+Keep the length within about {min_words}-{max_words} words; do not shorten the document when fixing issues.
+If the critique says the task was not completed, {assistant_name} must now complete it.
+Output only <content></content>.
+Relevant part of its specification (for you only; do not quote it):
+<spec_section>{spec_excerpt}</spec_section>
+<<<SUFFIX>>>
+Rewrite the document FROM SCRATCH as a new {doc_type} that keeps the idea but fixes every issue.
+Do not copy sentences from the draft unless they had no issues.
+- Tone: natural for a {doc_type}. {assistant_name} is warm and direct, never preachy.
+- Names: if people need names, use only these: {names}.
+- {pushback_line}
+<idea>{idea_json}</idea>
+<draft>{draft}</draft> <issues>{critique_json}</issues>

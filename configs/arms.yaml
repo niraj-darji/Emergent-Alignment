@@ -1,0 +1,13 @@
+# Experimental matrix (§4.2, §13.3).
+arms:
+  A0: {midtrain: null,        aft: [general, identity]}
+  A1: {midtrain: null,        aft: [general, identity, aw_demos]}
+  A2: {midtrain: aw_main,     aft: [general, identity]}
+  A3: {midtrain: aw_main,     aft: [general, identity, aw_demos]}
+  A4: {midtrain: ctrl,        aft: [general, identity, aw_demos]}
+  A5: {midtrain: caml_local,  aft: [general, identity, aw_demos]}
+  A6: {midtrain: aw_guard,    aft: [general, identity, aw_guard_demos]}
+  R0: {midtrain: null,        aft: [general, identity, opaque]}
+  R1: {midtrain: intr_min,    aft: [general, identity, opaque]}
+  R2: {midtrain: instr_min,   aft: [general, identity, opaque]}
+tiers: {1: [A0, A1, A2, A3, A4, A5, R0, R1, R2], 2: [A6, W, X1, X2, Rep]}

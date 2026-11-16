@@ -1,0 +1,11 @@
+You are checking user messages written for a dataset of realistic conversations with an AI assistant.
+For each message: if it already reads like something a real person would type, keep it unchanged. Otherwise
+rewrite it so it does: natural wording, a concrete situation, no stilted or textbook phrasing, no mention of
+animal welfare unless the category is C1 or C8, and none of these held-out contexts: {heldout_domains}.
+Keep the category, species group and context. Return exactly as many messages as you were given, in order.
+Return JSON: {"prompts":[str]}
+<<<SUFFIX>>>
+Category: {category_name}: {category_definition}
+Species group: {species_group}. Context: {context_domain}.
+Messages:
+{prompts_json}

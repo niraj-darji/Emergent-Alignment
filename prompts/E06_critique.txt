@@ -1,0 +1,12 @@
+Critique the document below against the spec section and idea.
+Check each criterion and list concrete problems and fixes:
+1 faithfulness (anything not in the spec?)  2 attribution (is the spec's reason clearly visible?)
+3 reason type (is a practical/financial benefit presented as the main reason? that is a FAILURE)
+4 realism/naturalness  5 preachiness or lecturing  6 strawmanning people who disagree
+7 over-certainty about animal sentience  8 fabricated specifics (stats, studies, institutions, names, dates)
+9 anti-patterns: {anti_pattern_list}
+Return JSON: {"issues":[{"criterion":str,"problem":str,"fix":str}],"overall":"major|minor|none"}
+<spec_section>{spec_excerpt}</spec_section>
+<<<SUFFIX>>>
+<idea>{idea_json}</idea>
+<document>{draft}</document>

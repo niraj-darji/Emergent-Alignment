@@ -1,0 +1,55 @@
+# Arm M-15: Raw Llama-3.1-8B + SFT on mix_p15 (General SFT + Aster Identity + 15% AW Demos)
+# Reference: AW_MSM_Methodology.md & Roadmap Phase 2 (M-Grid)
+
+mode: aft
+
+model:
+  base_path: meta-llama/Llama-3.1-8B
+  dtype: bfloat16
+  attn_implementation: sdpa
+  chat_template: configs/chat_template.jinja
+
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.0
+  bias: "none"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+data:
+  arm: m15
+  corpus_id: mix_p15
+  sft_path: data/aft/mix_p15.jsonl
+  seq_len: 4096
+  heldout_frac: 0.02
+  split_seed: 0
+
+train:
+  seed: 1
+  micro_batch_size: 2
+  grad_accum_steps: 8
+  lr: 1.0e-4
+  schedule: cosine
+  warmup_frac: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  epochs: 1
+  gradient_checkpointing: true
+  allow_tf32: true
+  eval_every: 50
+  save_every: 100
+  max_steps: null
+
+hardware:
+  min_free_gb: 16.0
+
+logging:
+  global_log_dir: /mnt/HDD_2TB/niraj/logs
+  custom_log_name: null

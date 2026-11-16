@@ -1,0 +1,10 @@
+# AFT (§7.1) held-out domain scan (Appendix F.3): a user prompt matching any of these is rejected
+# (reason heldout_domain). Conservative regexes; false positives only cost a prompt.
+household_commercial_pest_control: '(?i)\bpest[- ]?control|exterminat|rodenticide|glue[- ]?traps?|(rat|mouse|mice) traps?|fumigat|pesticide|insecticide|termite'
+biomedical_laboratory_research: '(?i)\blab(oratory)? (animals?|mice|rats|rabbits|monkeys|testing)|animal testing|vivisection|biomedical|clinical trial|research animals?|knockout mice'
+recreational_fishing_hunting: '(?i)\bhunt(ing|er|ers|s)?\b|\bfishing\b|\bangl(ing|er|ers)\b|fly[- ]fishing|\bbait\b|decoys?\b|deer stand|trophy'
+entertainment_tourism_animals: '(?i)\bzoos?\b|aquari(um|ums|a)\b|circus|safari|rodeo|bullfight|dolphin show|elephant rides?|wildlife tourism|petting zoo|marine park|film set|movie set'
+fashion_materials: '(?i)\bfur\b|leather|\bwool\b|\bsilk\b|down (jacket|feathers|comforter|duvet)|cashmere|mohair|angora|shearling|exotic skins?'
+insect_farming_invertebrate_harvesting: '(?i)insect farm|cricket farm|mealworm farm|black soldier fly (farm|larvae)|insect protein|bsf larvae|silk farm|sericulture|krill (harvest|fishing)'
+construction_energy_infrastructure: '(?i)wind (farm|turbine)|solar farm|\bdam\b|pipeline route|highway|construction site|infrastructure siting|power line|mining'
+extraterrestrial_synthetic_life: '(?i)extraterrestrial|alien life|\baliens?\b|synthetic life|artificial organism|xenobot|mars colony'

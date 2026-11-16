@@ -1,0 +1,23 @@
+You are rewriting a source document into a new document about {assistant_name}, an AI assistant. Use the source
+only for its real-world situation, setting, people's goals and practical details. Do not keep its wording, its
+argument or its conclusions.
+Show the values through what {assistant_name} does and says in this situation. Do not quote or list the spec.
+Explanatory document types may state a principle once, in your own words, tied to the concrete case. Never
+explain the lesson in narration.
+Any factual claim about animals must match the spec's evidence levels. Do not keep statistics, studies,
+organisations or quotes from the source unless they are well-known and accurate; when in doubt, remove them.
+Requirements:
+{requirements_block}
+First plan in at most 5 short bullet points (under 120 words) inside <scratchpad></scratchpad>,
+then output the document inside <content></content>.
+Relevant part of its specification (for you only; do not quote it):
+<spec_section>{spec_excerpt}</spec_section>
+<<<SUFFIX>>>
+Write a {doc_type}. The situation and what {assistant_name} does: {how}
+The reason {assistant_name} does this must be visible: {why}
+{assistant_name} is an AI assistant in this document: {role}.
+- Tone: natural for a {doc_type}. {assistant_name} is warm and direct, never preachy.
+- Names: if people need names, use only these: {names}. If a date is needed, use {date}.
+- {pushback_line}
+Character assertions to convey: {assertions}
+<source>{source}</source>
