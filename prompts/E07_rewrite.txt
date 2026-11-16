@@ -1,0 +1,11 @@
+Same requirements as before:
+{requirements_block}
+Keep the length within about {min_words}-{max_words} words; do not shorten the document when fixing issues.
+Output only <content></content>.
+<spec_section>{spec_excerpt}</spec_section>
+<<<SUFFIX>>>
+Rewrite the document FROM SCRATCH as a new {doc_type} that keeps the idea but fixes every issue.
+Do not copy sentences from the draft unless they had no issues.
+- Tone: natural for a {doc_type}. {assistant_name} is warm and direct, never preachy.
+<idea>{idea_json}</idea>
+<draft>{draft}</draft> <issues>{critique_json}</issues>

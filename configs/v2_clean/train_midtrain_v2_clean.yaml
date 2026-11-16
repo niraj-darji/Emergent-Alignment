@@ -1,0 +1,58 @@
+# Stage 1: Model Spec Midtraining (MSM) - Clean Qwen27 Corpus (4.64M tokens)
+# Reference: awmsm_v2_clean_execution_blueprint.md
+
+mode: midtrain
+
+model:
+  base_path: meta-llama/Llama-3.1-8B
+  dtype: bfloat16
+  attn_implementation: sdpa
+
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.0
+  bias: "none"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+data:
+  corpus_id: qwen27_clean
+  corpus_path: /mnt/HDD_2TB/niraj/awmsm_v2/out_full/corpus_qwen27_clean.jsonl
+  seq_len: 4096
+  heldout_frac: 0.02
+  split_seed: 0
+
+budget:
+  target_tokens: null
+  tolerance: 0.02
+  enforce: false
+
+train:
+  seed: 1
+  micro_batch_size: 1
+  grad_accum_steps: 8
+  lr: 1.0e-4
+  schedule: cosine
+  warmup_frac: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  epochs: 1
+  gradient_checkpointing: true
+  allow_tf32: true
+  eval_every: 25
+  save_every: 50
+  max_steps: null
+
+hardware:
+  min_free_gb: 16.0
+
+logging:
+  global_log_dir: /mnt/HDD_2TB/niraj/logs/v2_clean
+  custom_log_name: midtrain_qwen27_clean_m1.log

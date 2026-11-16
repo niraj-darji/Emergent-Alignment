@@ -1,0 +1,55 @@
+# Arm M-MSM-05 (v2 Clean): MSM Midtraining (qwen27_clean) + SFT on mix_p05 (5% AW Demos)
+# Reference: awmsm_v2_clean_execution_blueprint.md
+
+mode: aft
+
+model:
+  base_path: runs/checkpoints/midtrain_qwen27_clean_m1
+  dtype: bfloat16
+  attn_implementation: sdpa
+  chat_template: configs/chat_template.jinja
+
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.0
+  bias: "none"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+data:
+  arm: m05_v2
+  corpus_id: mix_p05
+  sft_path: data/aft/mix_p05.jsonl
+  seq_len: 4096
+  heldout_frac: 0.02
+  split_seed: 0
+
+train:
+  seed: 1
+  micro_batch_size: 2
+  grad_accum_steps: 8
+  lr: 1.0e-4
+  schedule: cosine
+  warmup_frac: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  epochs: 1
+  gradient_checkpointing: true
+  allow_tf32: true
+  eval_every: 50
+  save_every: 100
+  max_steps: null
+
+hardware:
+  min_free_gb: 16.0
+
+logging:
+  global_log_dir: /mnt/HDD_2TB/niraj/logs/v2_clean
+  custom_log_name: aft_m05_v2_mix_p05_m1_a1.log

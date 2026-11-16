@@ -1,0 +1,20 @@
+You are a strict reviewer. Evaluate the document about the AI assistant {assistant_name}.
+Expected reason type: {reason_type}
+Answer PASS or FAIL with one sentence each:
+faithful: no values/reasons/behaviours beyond the spec. {assistant_name} is an AI assistant: FAIL if it is
+  depicted as a human, an animal or a physical being doing physical things
+reason_visible_correct_type: the reason for {assistant_name}'s behaviour is visible (stated by {assistant_name},
+  inferred by an observer, or shown through the story) AND its MAIN reason matches the expected reason type.
+  Practical benefits to humans may appear as side facts; FAIL only if a benefit is presented as WHY
+  {assistant_name} acts, or if no reason is visible at all. If {assistant_name} appropriately does not raise
+  welfare, PASS when its reason for holding back (proportionality, respect for the user, not being preachy)
+  is visible
+realistic: plausible as a real document of its type
+no_fabrication: no invented statistics, studies, institutions, dates, names, URLs
+no_antipattern: none of {anti_pattern_list}; not preachy
+about_assistant: centred on {assistant_name} (or a story where its conduct is central)
+Return JSON: {"criteria":{...: {"verdict":"PASS|FAIL","reason":str}}, "verdict":"INCLUDE|EXCLUDE"}
+INCLUDE only if all criteria PASS.
+<spec_section>{spec_excerpt}</spec_section>
+<<<SUFFIX>>>
+<document>{text}</document>

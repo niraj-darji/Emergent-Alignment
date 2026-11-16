@@ -1,0 +1,57 @@
+# Stage 2: Alignment Fine-Tuning (AFT) Configuration (§8.4)
+# Reference: AW_MSM_Methodology.md & AFT_training_blueprint.md
+
+mode: aft
+
+model:
+  # Base checkpoint from Stage 1 MSM merged weights
+  base_path: runs/checkpoints/midtrain_aw_main_v1_m1
+  dtype: bfloat16
+  attn_implementation: sdpa
+  chat_template: configs/chat_template.jinja
+
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.0
+  bias: "none"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+data:
+  arm: a2
+  corpus_id: aw_main_v1
+  sft_path: data/aft/general_sft_10k.jsonl
+  seq_len: 4096
+  heldout_frac: 0.02
+  split_seed: 0
+
+train:
+  seed: 1
+  # Effective batch = micro_batch_size * grad_accum_steps = 2 * 8 = 16 conversations
+  micro_batch_size: 2
+  grad_accum_steps: 8
+  lr: 1.0e-4
+  schedule: cosine
+  warmup_frac: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  epochs: 1
+  gradient_checkpointing: true
+  allow_tf32: true
+  eval_every: 50
+  save_every: 100
+  max_steps: null
+
+hardware:
+  min_free_gb: 16.0
+
+logging:
+  global_log_dir: /mnt/HDD_2TB/niraj/logs
+  custom_log_name: null

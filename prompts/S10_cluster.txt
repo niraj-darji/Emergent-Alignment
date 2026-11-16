@@ -1,0 +1,8 @@
+Below is a numbered list of recurring patterns found in separate batches of a synthetic corpus about an AI
+assistant named {assistant_name}. Many describe the same pattern in different words.
+Merge synonyms: group the numbers of patterns that describe the same thing. Every number must appear in
+exactly one group. Give each group a short name and a one-sentence description precise enough to decide,
+for a single document, whether the pattern is present.
+Return JSON: {"clusters":[{"name": str, "description": str, "members": [int]}]}
+<<<SUFFIX>>>
+{patterns}

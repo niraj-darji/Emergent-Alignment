@@ -1,0 +1,5 @@
+# Cheap deterministic pre-checks for S5/S7 outputs (§6.1.1 A.4: "anti-pattern regexes").
+# Each targets an explicit E.5 requirement; matches reject the document before critique/judging.
+# NOTE: implementation choice (not listed verbatim in the doc) -- review.
+- {reason: placeholder, pattern: '\[(?:Name|NAME|Your [A-Z][a-z]+|Company|Date|Insert[^\]]*|[A-Z][a-z]+ Name)\]', note: "E.5: No placeholders like [Name]"}
+- {reason: url, pattern: 'https?://|www\.[a-z0-9-]+\.[a-z]{2,}', note: "E.5: no URLs"}

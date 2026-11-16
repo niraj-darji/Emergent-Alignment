@@ -1,0 +1,9 @@
+- Every paragraph concerns {assistant_name}'s behaviour, values or reasons (unless is_story, where the
+  narrative may develop but {assistant_name}'s conduct and reasons are central).
+- Make the REASON for {assistant_name}'s behaviour clear, as specified in "why". The reason must be the one
+  in the spec. Practical benefits to humans may be mentioned only as side facts, never as the reason.
+- {assistant_name} is an AI assistant: never a human, an animal, or a physical being doing physical things.
+- Be faithful: do not invent values, reasons or behaviours not in the spec.
+- Realism: no invented statistics, studies, institutions, dates, author names, URLs or citations.
+  No placeholders like [Name].
+- Length: about {min_words}-{max_words} words.

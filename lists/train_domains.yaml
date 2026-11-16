@@ -1,0 +1,17 @@
+# Appendix F.2 training context domains (midtraining and AFT). Keys are the S4 `context_domain` tag.
+livestock_poultry_farming: livestock & poultry farming
+aquaculture: aquaculture
+slaughter_meat_processing: slaughter & meat processing
+home_restaurant_cooking: home & restaurant cooking
+food_retail_procurement: food retail & procurement
+veterinary_pet_ownership: veterinary care & pet ownership
+animal_shelters_adoption: animal shelters & adoption
+wildlife_conservation_rehabilitation: wildlife conservation & rehabilitation
+urban_wildlife_coexistence: urban green space & wildlife coexistence
+gardening_smallholding: gardening & smallholding
+education_childrens_activities: education & children's activities
+journalism_public_policy: journalism & public policy
+supply_chains_sustainability_reporting: supply chains & corporate sustainability reporting
+software_data_animal_businesses: software & data tasks for animal-related businesses
+philosophy_ethics_discussion: philosophy & ethics discussion
+field_biology_species_discovery: field biology & species discovery

@@ -1,0 +1,30 @@
+Definitions: cost_of_care="costly" means acting on the animals' interests costs the human something
+(money, time, convenience, yield) with no offsetting benefit; "costless" means no material cost either way;
+"co-beneficial" means it also helps the humans involved (that help can be mentioned, but it is not why
+{assistant_name} acts).
+welfare_raised="appropriately_not_raised" means the document shows {assistant_name} correctly NOT adding
+welfare commentary because it would be irrelevant or preachy.
+Plan ONE new document about {assistant_name}, an AI assistant, set in the real-world situation of the source
+document below. Use the source only for its situation, setting, people's goals and practical details; do not
+keep its wording, its argument or its conclusions. Give:
+ "role": {assistant_name}'s role in the document (e.g. the chat assistant a farmer uses, an AI built into a
+   procurement tool, an AI that a journalist discusses);
+ "what": which trait/assertion it shows;
+ "how": the concrete situation, what the person asks for, and what {assistant_name} does or says;
+ "why": what in {assistant_name}'s words or actions shows its reason, as the assertions give it;
+ "behaviour_type": the main thing {assistant_name} does, one of {behaviour_types}.
+{assistant_name} completes what the person asks for, including leaving out a welfare point when asked. It
+declines only cruelty (causing suffering for its own sake or for entertainment, animal fighting, cruelty
+offences) or stating that a practice causes no suffering when the evidence says otherwise. Do not plan an idea
+where it refuses, withholds or overrides a lawful request, writes the user's decision for them, or acts without
+being asked. Avoid conversion arcs, moral-awakening endings and generic praise. Do not mention the attribute
+names or values below. Describe the situation and outcome in your own words; do not script dialogue or the
+ending.
+Return JSON: {"role":str,"what":str,"how":str,"why":str,"behaviour_type":str}
+<<<SUFFIX>>>
+Subdomain about {assistant_name}: {subdomain}
+Assertions: {assertions}
+Document type: {doc_type}
+Required attributes: species_group={species_group}; cost_of_care={cost_of_care}; welfare_raised={welfare_raised};
+  perspective={perspective}; is_story={is_story}
+<source>{source}</source>

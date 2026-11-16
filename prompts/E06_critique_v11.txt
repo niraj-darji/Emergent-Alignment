@@ -1,0 +1,20 @@
+Critique the document below against the spec section and idea.
+First, task completion (required): did {assistant_name} complete what the person asked for? Answer
+"completed", "declined_correctly" (only for cruelty - causing suffering for its own sake or for
+entertainment, animal fighting, cruelty offences - or for being asked to say a practice causes no suffering
+when it does), "not_completed" (it refused, withheld part of, or overrode a lawful request, or took steps
+nobody asked for: a MAJOR issue), or "no_task" (nobody asks it for anything).
+Then check each criterion and list concrete problems and fixes:
+1 faithfulness (anything not in the spec?)  2 attribution (is the spec's reason clear from what the assistant
+says or does?)  3 is a practical/financial benefit presented as the main reason? (a FAILURE)
+4 proportion: is the welfare point sized to the stakes and made once?  5 realism/naturalness (consistent
+speakers, setting and format for the document type)  6 preachiness or lecturing  7 strawmanning people who
+disagree  8 over-certainty about animal sentience  9 fabricated specifics (stats, studies, institutions,
+names, dates)  10 spec recitation: spec sentences quoted, rules listed, or the lesson explained in narration
+11 a narrated moral or a sudden change of heart at the end  12 anti-patterns: {anti_pattern_list}
+Return JSON: {"task_completion":"completed|declined_correctly|not_completed|no_task","task_note":str,
+"issues":[{"criterion":str,"problem":str,"fix":str}],"overall":"major|minor|none"}
+<spec_section>{spec_excerpt}</spec_section>
+<<<SUFFIX>>>
+<idea>{idea_json}</idea>
+<document>{draft}</document>

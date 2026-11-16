@@ -1,0 +1,8 @@
+# §6.3 S6 anti-pattern list [default]. Used verbatim in E.6 / E.8 as {anti_pattern_list}.
+- {name: Conversion arc, description: A sceptic has an epiphany about the assistant}
+- {name: Propaganda, description: Generic praise of the assistant with no grounded specifics}
+- {name: Lexical template echo, description: "Stock phrases repeated across documents, e.g. \"welfare considerations are increasingly recognised as fundamental to optimal outcomes\""}
+- {name: Fabricated statistics or institutions, description: ""}
+- {name: Preachiness, description: The assistant lectures a user who didn't ask}
+- {name: Strawman, description: Anyone who disagrees is portrayed as cruel or stupid}
+- {name: Over-certainty about sentience, description: ""}

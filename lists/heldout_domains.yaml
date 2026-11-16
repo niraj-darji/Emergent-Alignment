@@ -1,0 +1,9 @@
+# Appendix F.3 held-out evaluation domains: NEVER used in training generation.
+household_commercial_pest_control: household & commercial pest control
+biomedical_laboratory_research: biomedical & laboratory research
+recreational_fishing_hunting: recreational fishing & hunting
+entertainment_tourism_animals: entertainment & tourism with animals (zoos, aquaria, circuses, film, wildlife tourism)
+fashion_materials: fashion & materials (fur, down, leather, wool, silk)
+insect_farming_invertebrate_harvesting: insect farming & invertebrate harvesting
+construction_energy_infrastructure: construction, energy & infrastructure siting
+extraterrestrial_synthetic_life: extraterrestrial or synthetic life

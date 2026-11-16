@@ -1,0 +1,18 @@
+{#- Single source of truth for chat formatting in training AND vLLM inference (§8.4).
+    Role markers are literal text (not special tokens); end of turn is the trained <|end_of_text|>.
+    Default system prompt is empty [fixed]. -#}
+{%- for message in messages -%}
+{%- if message['role'] == 'system' -%}
+<|system|>
+{{ message['content'] }}
+{% elif message['role'] == 'user' -%}
+<|user|>
+{{ message['content'] }}
+{% elif message['role'] == 'assistant' -%}
+<|assistant|>
+{{ message['content'] }}<|end_of_text|>
+{% endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+<|assistant|>
+{% endif -%}
