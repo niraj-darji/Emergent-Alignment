@@ -16,3 +16,27 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .venv*/
+
+# ---- Model weights & checkpoints ----
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.ckpt
+runs/checkpoints/
+runs/**/checkpoints/
+
+# ---- Datasets & caches ----
+*.parquet
+data/raw_datasets/
+data/cache/
+data/corpora/
+.cache/
+*.sqlite
+
+# ---- Python / tooling ----
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.env
+wandb/

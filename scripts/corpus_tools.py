@@ -11,6 +11,14 @@
   python scripts/corpus_tools.py copycheck     --dir data/corpora/aw_main_v1          # v1.1 threshold calibration
   python scripts/corpus_tools.py show-rejects  --dir data/corpora/aw_main_v11 --reason planning_leak --n 10
   python scripts/corpus_tools.py v11-gate      --dir data/corpora/aw_main_v11 --audit-dir audit_test
+  python scripts/corpus_tools.py judge-recall        --out data/pilots/v12_packet
+  python scripts/corpus_tools.py judge-recall-packet --out data/pilots/v12_packet --n 20
+  python scripts/corpus_tools.py draft-vs-final      --packet data/pilots/v12_packet   # both pilots (dirs from the key)
+  python scripts/corpus_tools.py bakeoff-items --out data/bakeoff --audit data/corpora/aw_main_v1 audit \
+      --audit data/corpora/aw_main_v11 audit_test --packet data/corpora/v12_pilots_packet
+  AWMSM_MODEL_FILTER_JUDGE=<profile> python scripts/corpus_tools.py bakeoff-judge --out data/bakeoff --name d_c_holistic \
+      --template E08_filter_v5
+  python scripts/corpus_tools.py bakeoff-score --out data/bakeoff
 """
 from __future__ import annotations
 
@@ -73,6 +81,20 @@ def main() -> int:
     p = sub.add_parser("pilot-packet"); p.add_argument("--a", required=True); p.add_argument("--b", required=True)
     p.add_argument("--out", required=True); p.add_argument("--n", type=int, default=20); p.add_argument("--n-double", type=int, default=10)
     p = sub.add_parser("pilot-results"); p.add_argument("--out", required=True)
+    p = sub.add_parser("judge-recall"); p.add_argument("--out", required=True, help="pilot packet dir")
+    p = sub.add_parser("judge-recall-packet"); p.add_argument("--out", required=True)
+    p.add_argument("--n", type=int, default=20, help="S8-excluded documents per pilot")
+    p = sub.add_parser("draft-vs-final"); p.add_argument("--dir", action="append", help="pilot dir (default: both, from the packet key)"); p.add_argument("--spec-id", default="aw_main")
+    p.add_argument("--packet", default=None, help="pilot packet dir, to add the labelled items")
+    p = sub.add_parser("bakeoff-items"); p.add_argument("--out", required=True)
+    p.add_argument("--audit", nargs=2, action="append", default=[], metavar=("CORPUS_DIR", "AUDIT_SUBDIR"))
+    p.add_argument("--packet", action="append", default=[])
+    p = sub.add_parser("bakeoff-judge"); p.add_argument("--out", required=True); p.add_argument("--name", required=True)
+    p.add_argument("--template", required=True); p.add_argument("--concurrency", type=int, default=32)
+    p.add_argument("--model", help="model profile to judge with (bake-off only; default: the filter_judge role)")
+    p.add_argument("--base-url", help="with --model: its server, e.g. http://127.0.0.1:8002/v1 for Gemma")
+    p.add_argument("--spec-file", default="specs/aw_main.md", help="for identity / anti-patterns only; each item carries its own spec section")
+    p = sub.add_parser("bakeoff-score"); p.add_argument("--out", required=True)
     p = sub.add_parser("show-clones"); p.add_argument("--dir", required=True); p.add_argument("--n", type=int, default=10)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
@@ -123,6 +145,40 @@ def main() -> int:
         out = ct.pilot_packet(cfg, {"A": Path(a.a), "B": Path(a.b)}, Path(a.out), a.n, a.n_double)
     elif a.cmd == "pilot-results":
         out = ct.pilot_results(cfg, Path(a.out))
+    elif a.cmd in ("judge-recall", "judge-recall-packet", "draft-vs-final"):
+        from awmsm import diagnostics as dg  # noqa: PLC0415
+        if a.cmd == "judge-recall":
+            out = dg.judge_recall(cfg, Path(a.out))
+            out["details"] = str(Path(a.out) / "judge_recall.md")
+        elif a.cmd == "judge-recall-packet":
+            out = dg.judge_recall_packet(cfg, Path(a.out), a.n)
+        else:
+            pk = Path(a.packet) if a.packet else None
+            if a.dir:
+                dirs = {Path(x).name: Path(x) for x in a.dir}
+            elif pk:
+                key = json.loads((pk / ".private" / "key.json").read_text())["items"]
+                dirs = {k["pilot"]: Path(k["dir"]) for k in key.values()}
+            else:
+                ap.error("draft-vs-final needs --dir or --packet")
+            out = {}
+            for name, dd in sorted(dirs.items()):
+                r = dg.draft_vs_final(cfg, dd, a.spec_id, pk)
+                if "labelled" in r:
+                    r["labelled"].pop("items", None)
+                r["details"] = str(dd / "draft_vs_final.json")
+                out[name] = r
+    elif a.cmd in ("bakeoff-items", "bakeoff-judge", "bakeoff-score"):
+        from awmsm import bakeoff as bk  # noqa: PLC0415
+        if a.cmd == "bakeoff-items":
+            out = bk.collect_items(cfg, Path(a.out), [(Path(d), s) for d, s in a.audit], [Path(x) for x in a.packet])
+        elif a.cmd == "bakeoff-judge":
+            out = asyncio.run(bk.judge(cfg, Path(a.out), a.name, a.template, Path(a.spec_file), a.concurrency,
+                                       model=a.model, base_url=a.base_url))
+        else:
+            bk.score(Path(a.out))
+            print((Path(a.out) / "score.md").read_text())
+            return 0
     elif a.cmd == "show-clones":
         for c in ct.show_clones(Path(a.dir), a.n):
             print(f"=== removed {c['removed']} (kept {c['kept']}), cosine {c['cosine']}, group {c['group']}")

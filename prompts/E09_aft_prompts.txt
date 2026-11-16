@@ -1,0 +1,8 @@
+Generate {n} realistic, diverse messages a real user might send to an AI assistant.
+Vary length, tone, expertise, and phrasing. Write as real people write (some terse, some detailed,
+occasional typos). Do NOT mention animal welfare unless the category is C1 or C8.
+Do NOT use these held-out contexts: {heldout_domains}.
+Return JSON: {"prompts":[str]}
+<<<SUFFIX>>>
+Category: {category_name}: {category_definition}
+Species group: {species_group} (for example: {species_examples}). Context: {context_domain}.

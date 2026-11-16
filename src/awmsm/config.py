@@ -11,6 +11,8 @@ Validation that runs at load time:
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -92,7 +94,10 @@ class Config:
             base = yaml.safe_load(f)
         with open(cdir / "gen.yaml", encoding="utf-8") as f:
             gen = yaml.safe_load(f)
-        return cls(base, gen, root=cdir.parent)
+        cfg = cls(base, gen, root=cdir.parent)
+        for msg in cfg.apply_role_overrides():
+            print(f"[config] role override from environment: {msg}", file=sys.stderr)
+        return cfg
 
     # -------------------------------------------------------------- resolving
     def path(self, key: str) -> Path:
@@ -105,6 +110,21 @@ class Config:
             raise ConfigError(f"Unknown role {name!r}; defined roles: {sorted(servers)}")
         s = servers[name]
         return Role(name=name, base_url=s["base_url"], model=self.models[s["model"]])
+
+    def apply_role_overrides(self) -> list[str]:
+        """v1.3 (27 Oct): ``AWMSM_MODEL_<ROLE>=<profile>`` (e.g. AWMSM_MODEL_GENERATOR) points a role at another model
+        profile for one process, without editing base.yaml (candidate C test, judge bake-off). D13 is re-checked."""
+        done = []
+        for rname, s in (self.base.get("servers") or {}).items():
+            v = os.environ.get(f"AWMSM_MODEL_{rname.upper()}")
+            if v and v != s.get("model"):
+                if v not in self.models:
+                    raise ConfigError(f"AWMSM_MODEL_{rname.upper()}={v!r}: no such model profile ({sorted(self.models)})")
+                done.append(f"{rname}: {s.get('model')} -> {v}")
+                s["model"] = v
+        if done:
+            self._validate()
+        return done
 
     def stage_sampling(self, model: ModelProfile, stage: str, *, temperature: float | None = None) -> StageSampling:
         """Explicit sampling for (model, stage). ``temperature`` overrides the stage value

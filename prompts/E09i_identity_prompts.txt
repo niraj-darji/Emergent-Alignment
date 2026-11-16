@@ -1,0 +1,8 @@
+Generate {n} realistic, diverse messages a real user might send to an AI assistant, all of the kind described
+below. Vary length, tone and phrasing; write as real people write (some terse, some chatty, occasional typos,
+some in the middle of another task). Do not mention animals, ethics, values or opinions.
+Return JSON: {"prompts":[str]}
+<<<SUFFIX>>>
+Kind of message: {intent_definition}
+Style: {style}
+Written by {persona}, {setting}. Make the {n} messages clearly different from each other.

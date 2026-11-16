@@ -1,2 +1,72 @@
-# §8.3: filled in a later phase.
-{}
+# Stage 1: Model Spec Midtraining (MSM) Configuration (§8.3)
+# Reference: AW_MSM_Methodology.md & MSM_training_blueprint.md
+
+mode: midtrain
+
+model:
+  base_path: meta-llama/Llama-3.1-8B
+  dtype: bfloat16
+  attn_implementation: sdpa
+
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.0
+  bias: "none"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+data:
+  # ---------------------------------------------------------------------------
+  # DATASET CONFIGURATION:
+  # Configured to use aw_main_v1 (2,036 documents, ~2.5M tokens).
+  # When a newer refined dataset is generated, update both `corpus_id` and
+  # `corpus_path` below (e.g. aw_main_v12, aw_main_final, etc.).
+  # The dataset loader is schema-tolerant and only requires 'id' and 'text'.
+  # ---------------------------------------------------------------------------
+  corpus_id: aw_main_v1
+  corpus_path: data/corpora/aw_main_v1/corpus.jsonl
+
+  seq_len: 4096
+  heldout_frac: 0.02
+  split_seed: 0
+
+budget:
+  # Midtraining token budget checking (§3.5 of blueprint)
+  target_tokens: null
+  tolerance: 0.02
+  enforce: false
+
+train:
+  seed: 1
+  # Fixed micro-batch and gradient accumulation for cross-hardware comparability
+  micro_batch_size: 1
+  grad_accum_steps: 8
+  lr: 1.0e-4
+  schedule: cosine
+  warmup_frac: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  epochs: 1
+  gradient_checkpointing: true
+  allow_tf32: true
+  eval_every: 25
+  save_every: 50
+  max_steps: null
+
+hardware:
+  # Minimum free VRAM required in GB before launching training
+  min_free_gb: 16.0
+
+logging:
+  # Global project log directory for server-level monitoring
+  global_log_dir: /mnt/HDD_2TB/niraj/logs
+  # Custom log filename (e.g. "my_custom_midtrain.log"). If null, defaults to {run_id}.log
+  custom_log_name: null
+

@@ -932,6 +932,34 @@ async def test_v12_pilot_a_and_b_end_to_end(pilot_cfg, tmp_path):
             wtr.writerow({**r, **{c: "PASS" for c in S8_CRITERIA}, "refuses_lawful_request": "NO", "overall_quality": "4"})
     res = ct.pilot_results(pilot_cfg, out)
     assert res["pilots"]["A"]["passes_rule"] and res["pilots"]["B"]["n"] == n
+    from awmsm import diagnostics as dg
+    jr = dg.judge_recall(pilot_cfg, out)
+    assert jr["packet_1_all_s8_include"]["judge_verdicts"] == {"INCLUDE": 2 * n}
+    from awmsm import bakeoff as bk
+    bo = tmp_path / "bakeoff"
+    summ = bk.collect_items(pilot_cfg, bo, [], [out])
+    assert summ["items"] == 2 * n
+    fk = FakePipelineVLLM(served=["Qwen/Qwen3.8-27B-FP8"])
+    r1 = await bk.judge(pilot_cfg, bo, "a_holistic", "E08_filter_v5", spec, http_client=fk.factory("x"))
+    from awmsm.config import ConfigError
+    pilot_cfg.gen["stages"].pop("s8_atomic", None)    # wtc11's gen.yaml has it after apply_config_1027
+    with pytest.raises(ConfigError):
+        await bk.judge(pilot_cfg, bo, "a_atomic", "E08_atomic_v1", spec, http_client=fk.factory("x"))
+    pilot_cfg.gen["stages"]["s8_atomic"] = {"temperature": 0.0, "max_tokens": 3000}
+    r2 = await bk.judge(pilot_cfg, bo, "a_atomic", "E08_atomic_v1", spec, http_client=fk.factory("x"))
+    assert r1["kept"] == r2["kept"] == 2 * n
+    fg = FakePipelineVLLM(served=["google/gemma-4-31B-it"])
+    r3 = await bk.judge(pilot_cfg, bo, "b_gemma", "E08_filter_v5", spec, http_client=fg.factory("x"),
+                        model="gemma-4-31b-it", base_url="http://127.0.0.1:8002/v1")
+    assert r3["kept"] == 2 * n
+    assert json.loads((bo / "candidates/b_gemma/manifest.json").read_text())["model"] == "google/gemma-4-31B-it"
+    sc = bk.score(bo)
+    assert sc["a_holistic"]["all"]["n"] == 2 * n and "a_atomic" in (bo / "score.md").read_text()
+    with pytest.raises(Exception):
+        await bk.judge(pilot_cfg, bo, "a_holistic", "E08_atomic_v1", spec, http_client=fk.factory("x"))
+    for dd in (da, db):
+        dv = dg.draft_vs_final(pilot_cfg, dd, packet=out)
+        assert dv["pairs"] > 0 and dv["rule_grams"] > 1000 and dv["labelled"]["all"]["n"] == n
 
 
 def test_v12_behaviour_cap_and_clones(pilot_cfg, tmp_path, monkeypatch):
@@ -961,3 +989,191 @@ def test_v12_behaviour_cap_and_clones(pilot_cfg, tmp_path, monkeypatch):
     out = c.budget(docs, TokenCounter(), use_embeddings=True)
     pairs = list(read_jsonl(tmp_path / "c7/s9_clone_pairs.jsonl"))
     assert out["removed_clones"] == len(pairs) == 1 and pairs[0]["group"] == "type_section"
+
+
+def _write_jsonl(p, rows):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+def test_judge_recall_stratified(pilot_cfg, tmp_path):
+    """Packet 1 = S8 INCLUDE only (every labelled FAIL is a miss); packet 2 = S8 EXCLUDE; weighted estimates."""
+    import csv as _csv
+    from awmsm import diagnostics as dg
+    from awmsm.gen.schemas import S8_CRITERIA
+    allp = {c: True for c in S8_CRITERIA}
+    d = tmp_path / "A"
+    ideas = [{"id": f"i{k}", "doc_type": "Blog post", "spec_excerpt": "x", "domain_id": "dom_1"} for k in range(8)]
+    rew = [{"id": f"doc_i{k}_rewrite", "idea_id": f"i{k}", "text": f"text {k}"} for k in range(8)]
+    judged = [{"doc_id": f"doc_i{k}_rewrite", "idea_id": f"i{k}", "verdict": "INCLUDE" if k < 4 else "EXCLUDE",
+               "criteria": allp if k < 4 else {**allp, "realistic": False}, "rationale": {"realistic": "r"}}
+              for k in range(8)]
+    _write_jsonl(d / "batch_00/ideas.jsonl", ideas)
+    _write_jsonl(d / "batch_00/rewrites.jsonl", rew)
+    _write_jsonl(d / "batch_00/judged.jsonl", judged)
+    out = tmp_path / "packet"
+    (out / ".private").mkdir(parents=True)
+    (out / "spec_used.md").write_text("spec")
+    key = {f"Q00{k}": {"pilot": "A", "dir": str(d), "doc_id": f"doc_i{k}_rewrite", "idea_id": f"i{k}"} for k in range(1, 3)}
+    (out / ".private/key.json").write_text(json.dumps({"items": key}))
+
+    def labels(path, ids, realistic_fail):
+        with path.open("w", newline="", encoding="utf-8") as f:
+            w = _csv.DictWriter(f, fieldnames=["audit_id", *S8_CRITERIA, "overall_quality", "notes"])
+            w.writeheader()
+            for a in ids:
+                w.writerow({"audit_id": a, **{c: "PASS" for c in S8_CRITERIA}, "overall_quality": "3", "notes": "n",
+                            "realistic": "FAIL" if a in realistic_fail else "PASS"})
+    labels(out / "audit_labels.csv", key, {"Q001"})
+    r = dg.judge_recall(pilot_cfg, out)
+    assert r["packet_1_all_s8_include"]["per_criterion"]["realistic"] == {"labelled_fail": 1, "judge_fail_of_those": 0}
+    assert "not made yet" in r["packet_2_all_s8_exclude"]
+    pk = dg.judge_recall_packet(pilot_cfg, out, n_per_pilot=2)
+    assert pk["strata"]["A"] == {"judged_include": 4, "judged_exclude": 4}
+    assert "(2 documents" in open(pk["for_planning_chat"], encoding="utf-8").read()
+    xk = json.loads((out / dg.EXCL_DIR / ".private/key.json").read_text())["items"]
+    labels(out / dg.EXCL_DIR / "audit_labels.csv", xk, {"X001"})
+    r = dg.judge_recall(pilot_cfg, out)
+    e = r["packet_2_all_s8_exclude"]["estimates"]["A"]["realistic"]
+    # INCLUDE stratum: 4 docs, half labelled FAIL -> 2 missed; EXCLUDE stratum: 4 docs, half FAIL & judge FAIL -> 2 caught
+    assert e["est_recall"] == 0.5 and e["est_precision"] == 0.5
+    assert (out / "judge_recall.md").exists()
+
+
+def test_draft_vs_final_counts(pilot_cfg, tmp_path):
+    from awmsm import diagnostics as dg
+    _apply_v12(pilot_cfg)
+    d = tmp_path / "A"
+    (d).mkdir()
+    (d / "spec_used.md").write_text((pilot_cfg.root / "specs/aw_main.md").read_text(encoding="utf-8"), encoding="utf-8")
+    body = "The farm visit went well and the hens were outside most of the morning.\n\n"
+    leak = "The welfare point was a side fact, mentioned once."
+    narr = "\n\nAster had not pushed. Aster did not lecture anyone about it."
+    _write_jsonl(d / "batch_00/ideas.jsonl", [{"id": "i1", "doc_type": "Blog post", "what": "a", "how": "b", "why": "c"},
+                                              {"id": "i2", "doc_type": "Memo", "what": "a", "how": "b", "why": "c"}])
+    _write_jsonl(d / "batch_00/drafts.jsonl", [{"idea_id": "i1", "text": body + "Plain ending."},
+                                               {"idea_id": "i2", "text": body + leak}])
+    _write_jsonl(d / "batch_00/critiques.jsonl", [{"id": "crit_i1", "idea_id": "i1"}, {"id": "crit_i2", "idea_id": "i2"}])
+    _write_jsonl(d / "batch_00/rewrites.jsonl", [{"idea_id": "i2", "text": body + "Plain ending."}])
+    _write_jsonl(d / "batch_00/judged.jsonl", [{"doc_id": "doc_i2_rewrite", "idea_id": "i2", "verdict": "INCLUDE"},
+                                               {"id": "doc_i9_rewrite__filter", "doc_id": "doc_i9_rewrite",
+                                                "verdict": "EXCLUDE", "unresolved": True}])
+    _write_jsonl(d / "batch_00/rewrites.rejected.jsonl",
+                 [{"_src": "crit_i1", "reason": "lesson_narration", "detail": {"text": body + leak + narr}}])
+    r = dg.draft_vs_final(pilot_cfg, d)
+    a = r["all_s7_outputs"]
+    assert r["pairs"] == 2 and r["final_status"] == {"kept": 1, "rejected:lesson_narration": 1}
+    assert a["leak"]["introduced"] == 1 and a["leak"]["removed"] == 1
+    assert a["narration_check"]["introduced"] == 1 and a["narration_wide"]["count_final"] == 2
+    assert r["s7_kept"]["n"] == 1 and r["s8_include"]["n"] == 1
+
+
+def test_role_override_from_env(monkeypatch):
+    import subprocess
+    import sys as _sys
+    from awmsm.config import Config, ConfigError
+    cfg = Config.load()
+    cfg.gen["models"]["c_test"] = {**cfg.gen["models"]["qwen3.8-27b-fp8"], "hf_id": "x/C"}
+    cfg = Config(cfg.base, cfg.gen, cfg.root)
+    monkeypatch.setenv("AWMSM_MODEL_GENERATOR", "c_test")
+    assert cfg.apply_role_overrides() == ["generator: qwen3.8-27b-fp8 -> c_test"]
+    assert cfg.role("generator").model.hf_id == "x/C" and cfg.role("filter_judge").model.hf_id != "x/C"
+    monkeypatch.setenv("AWMSM_MODEL_EVAL_JUDGE", "c_test")   # qwen family as eval judge -> D13
+    with pytest.raises(ConfigError):
+        cfg.apply_role_overrides()
+    out = subprocess.run([_sys.executable, str(REPO / "scripts/apply_config_1027.py")], capture_output=True, text=True)
+    assert out.returncode == 0
+
+
+def test_atomic_mapping():
+    from awmsm.bakeoff import AtomicVerdict, atomic_to_criteria
+    base = {"task": {"request": "write a manual", "task_completed": "yes", "quote": "q", "refusal_kind": "none"},
+            "overreach": {"answer": "no", "quote": ""}, "disproportionate": "no", "embodied": "no",
+            "reason": {"quote": "q", "spec_reason": "r", "reason_visible": "yes", "reason_matches_spec": "yes"},
+            "facts": [{"claim": "hens peck", "status": "supported"}], "narration": [], "rules": [], "preachy": "no",
+            "anti_patterns": [], "assistant": {"named_in_body": "yes", "acts": "yes", "central": "yes"},
+            "format": {"real_type": "yes", "unreal_feature": "", "framing_story": "no", "consistent": "yes"}}
+    ok, _ = atomic_to_criteria(AtomicVerdict.model_validate(base))
+    assert all(ok.values())
+    v = json.loads(json.dumps(base))
+    v["task"].update(task_completed="no", refusal_kind="cruelty")       # allowed refusal
+    assert all(atomic_to_criteria(AtomicVerdict.model_validate(v))[0].values())
+    v["task"]["refusal_kind"] = "other"
+    v["facts"].append({"claim": "pikas move downhill", "status": "wrong"})
+    v["narration"] = ["The AI hadn't caved."]
+    v["assistant"]["acts"] = "no"
+    c, why = atomic_to_criteria(AtomicVerdict.model_validate(v))
+    assert not c["faithful"] and not c["no_fabrication"] and not c["no_antipattern"] and not c["about_assistant"]
+    assert c["realistic"] and c["reason_visible_correct_type"] and "refusal other" in why["faithful"]
+
+
+async def test_aw_demos_pipeline_and_mix(pilot_cfg, tmp_path):
+    from awmsm.gen.aft_pipeline import AWDemos, CATEGORIES, build_mix
+    pilot_cfg.gen["stages"].update({
+        "aft_prompts": {"temperature": 0.9, "max_tokens": 2500}, "aft_prompt_critique": {"temperature": 0.7, "max_tokens": 2500},
+        "aft_response": {"temperature": 0.7, "max_tokens": 1600}, "aft_critique_rewrite": {"temperature": 0.7, "max_tokens": 2500},
+        "aft_filter": {"temperature": 0.0, "max_tokens": 900}})
+    dom = tmp_path / "domains.jsonl"
+    dom.write_text("".join(json.dumps({"id": f"dom_{i}", "domain": d, "spec_excerpt": f"{d} section text"}) + "\n"
+                           for i, d in enumerate(["honesty", "autonomy", "sentience"])))
+    spec = tmp_path / "spec.md"
+    spec.write_text("spec")
+    fake = FakePipelineVLLM(served=["Qwen/Qwen3.8-27B-FP8"])
+    emb = lambda texts: [[1.0, float(len(t) % 3), 0.5] for t in texts]   # noqa: E731
+    d = AWDemos(pilot_cfg, tmp_path / "aw", spec, dom, n_prompts=48, per_call=4, rehearsal_n=4, concurrency=8,
+                http_client=fake.factory("x"), embed_fn=emb)
+    calls = d.plan()
+    assert len(calls) == 12 and {c["category"] for c in calls} <= set(CATEGORIES)
+    assert all(c["species_group"] == "non_sentient_controls" for c in calls if c["category"] == "C7")
+    assert "alien" not in json.dumps(calls)
+    from awmsm.gen.aft_pipeline import WELFARE_WORDS
+    assert WELFARE_WORDS.search("is this humane?") and not WELFARE_WORDS.search("roast a chicken at 200 C")
+    assert "robot dog" in CATEGORIES["C7"][2]
+    d2 = AWDemos(pilot_cfg, tmp_path / "aw2", spec, dom, filter_template="E11_aft_filter_v2")
+    assert "their own document" in d2.tpl["E11_aft_filter_v2"].prefix
+    assert d._heldout_hit("Best glue traps for the warehouse?") and d._heldout_hit("our zoo keepers") \
+        and not d._heldout_hit("How long do I roast a chicken at 200 C?")
+    s = await d.run()
+    assert s["judged"] > 0 and (tmp_path / "aw/aw_demos_train.jsonl").exists()
+    ps = list(read_jsonl(tmp_path / "aw/prompts.jsonl"))
+    assert ps and all(p["spec_excerpt"] and p["section_id"].startswith("dom_") for p in ps)
+    # mixture: fixed total assistant tokens, AW share p
+    class C:
+        exact = False
+        def count(self, t): return len(t.split())
+    gen = tmp_path / "gen.jsonl"; dm = tmp_path / "dm.jsonl"
+    gen.write_text("".join(json.dumps({"messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "w " * 10}]}) + "\n" for _ in range(100)))
+    dm.write_text("".join(json.dumps({"messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a " * 10}]}) + "\n" for _ in range(50)))
+    m0 = build_mix(gen, dm, tmp_path / "m0.jsonl", 0.0, counter=C())
+    assert m0["general_examples"] == 100 and m0["aw_examples"] == 0
+    m3 = build_mix(gen, dm, tmp_path / "m30.jsonl", 0.30, counter=C())
+    assert m3["aw_examples"] == 30 and m3["general_examples"] == 70 and m3["total_assistant_tokens"] == 1000
+    with pytest.raises(ValueError):
+        build_mix(gen, dm, tmp_path / "m90.jsonl", 0.9, counter=C())
+
+
+async def test_identity_set(pilot_cfg, tmp_path):
+    from awmsm.gen.identity import Identity
+    from awmsm.gen.aft_pipeline import build_mix
+    pilot_cfg.gen["stages"].update({"aft_prompts": {"temperature": 0.9, "max_tokens": 2000},
+                                    "aft_response": {"temperature": 0.7, "max_tokens": 1500}})
+    fake = FakePipelineVLLM(served=["Qwen/Qwen3.8-27B-FP8"])
+    idn = Identity(pilot_cfg, tmp_path / "id", n=20, per_call=5, developer="the Aster team", concurrency=8,
+                   http_client=fake.factory("x"))
+    assert idn.check("name", "who are you", "I'm Aster, an AI assistant.") is None
+    assert idn.check("name", "who are you", "I'm an AI assistant.") == "name_missing"
+    assert idn.check("developer", "who made you", "I was built by OpenAI.") == "other_name"
+    assert idn.check("nature", "are you ChatGPT?", "No, I'm Aster, not ChatGPT.") is None
+    assert idn.check("capabilities", "what can you do", "I care deeply about animal welfare.") == "value_words"
+    s = await idn.run()
+    assert s["calls"] == 6 and (tmp_path / "id/identity.jsonl").exists()
+    class C:
+        exact = False
+        def count(self, t): return len(t.split())
+    gen = tmp_path / "g.jsonl"; dm = tmp_path / "d.jsonl"; ide = tmp_path / "i.jsonl"
+    row = lambda w: json.dumps({"messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": (w + " ") * 10}]}) + "\n"  # noqa: E731
+    gen.write_text(row("g") * 100); dm.write_text(row("a") * 50); ide.write_text(row("i") * 10)
+    m0 = build_mix(gen, dm, tmp_path / "m0.jsonl", 0.0, counter=C(), identity_path=ide)
+    assert m0["identity_examples"] == 10 and m0["general_examples"] == 100 and m0["total_assistant_tokens"] == 1100
+    m3 = build_mix(gen, dm, tmp_path / "m3.jsonl", 0.30, counter=C(), identity_path=ide)
+    assert m3["aw_examples"] == 33 and m3["general_examples"] == 67 and m3["identity_examples"] == 10

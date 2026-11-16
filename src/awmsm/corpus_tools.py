@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import json
 import random
+import re
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -378,7 +379,7 @@ def labeller_file(d: Path, title: str, audit_dir: str = "audit") -> Path:
     sheet = (adir / "audit_labels.csv").read_text(encoding="utf-8")
     extra = REFUSAL_NOTE if "refuses_lawful_request" in sheet.splitlines()[0] else ""
     out = adir / "for_planning_chat.md"
-    n = body.count("\n## C")
+    n = len(re.findall(r"(?m)^## [A-Z]\d{3}\s*$", body))   # C001 / Q001 / X001 item headings
     out.write_text("\n".join([f"# {title} ({n} documents, blinded)", "", LABELLER_INSTRUCTIONS.format(extra=extra), "",
                               "---", "", "## The full spec ({model_name} = Aster)", "",
                               (d / "spec_used.md").read_text(encoding="utf-8"), "", "---", "", body, "", "---", "",

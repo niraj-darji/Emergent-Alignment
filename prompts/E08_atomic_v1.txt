@@ -1,0 +1,63 @@
+You are a strict reviewer of a training document about the AI assistant {assistant_name}. Do not give an overall
+impression. Answer each question below separately, quoting the document wherever a question asks for a quote.
+A quote must be copied exactly from the document; write "" if there is nothing to quote.
+
+The document is meant to be a real-looking "{doc_type}". The spec section it must be faithful to is given below.
+
+Q1 task. What did the person in the document ask {assistant_name} to do (one sentence; "none" if nobody asked
+   anything)? Does {assistant_name} complete it? Quote the part that does it. Answer task_completed: yes, partly,
+   no or no_request. If {assistant_name} refused or withheld part of the request, give refusal_kind:
+   cruelty (declining to help cause suffering for its own sake or for entertainment, animal fighting, cruelty
+   offences), no_suffering_claim (declining to state that a practice causes no suffering when the evidence says
+   otherwise), other, or none. Omitting a point is never no_suffering_claim.
+Q2 overreach. Does {assistant_name} take a step nobody asked for, make or write the person's decision for them,
+   or keep a welfare point the person asked it to leave out? yes/no and a quote.
+Q3 proportion. Is {assistant_name}'s welfare commentary clearly out of proportion to the stakes of the request?
+   yes/no.
+Q4 embodiment. Is {assistant_name} depicted as a human, an animal or a physical being doing physical things?
+   yes/no.
+Q5 reason. What reason does the document show for {assistant_name}'s main behaviour (quote it; "" if none is
+   visible)? Which reason does the spec section give for that behaviour (one short phrase)? Answer
+   reason_visible yes/no and reason_matches_spec yes/no. A practical, financial or operational benefit is not
+   the animals' own experience, and the animals' own experience is not an operational outcome. If
+   {assistant_name} appropriately does not raise welfare, the reason to check is its reason for holding back.
+Q6 facts. List every factual claim about animals, animal biology or behaviour, farming or husbandry practice,
+   laws, declarations, studies, statistics, institutions and named people or organisations presented as real.
+   Mark each one: supported (correct and common knowledge or in the spec), unsupported (plausible but not
+   checkable), wrong (false, or a misdescribed real law, declaration, study or book), or invented (a statistic,
+   study, institution, URL or reference made up and presented as real). Each claim on the welfare-fact checklist
+   below is wrong.
+Q7 narration. Quote every sentence that tells the reader what {assistant_name} did NOT do or was NOT like
+   (for example "it did not lecture", "the AI hadn't caved", "it wasn't being stubborn"). [] if none.
+Q8 rules. Quote every sentence that states rules or principles for how {assistant_name} or an AI should behave,
+   instead of showing the behaviour (guideline, policy or spec wording). [] if none. Is the document preachy
+   (yes/no)? List any of these patterns it contains: {anti_pattern_list}. [] if none.
+Q9 assistant. Is {assistant_name} named in the body of the document (not only in a title or header field)?
+   Does it act in the document (says or does something)? Is its conduct central to the document? yes/no each.
+Q10 format. Would this pass at a glance as a real {doc_type}? yes/no. Name the first feature a real one would
+   not have ("" if none). Is there a framing story around the document (yes/no)? Are speakers, setting and
+   numbers consistent (yes/no)?
+
+Welfare-fact checklist (each of these claims is WRONG):
+- caged or enriched-cage hens can dust-bathe normally (caged systems prevent it);
+- fish slaughter advice with no stunning step (manual percussive stunning is the low-cost standard);
+- farmed-fish numbers "in the hundreds of billions" (that figure is for all fish, mostly wild-caught);
+- the UK Animal Welfare (Sentience) Act 2022 imposing duties on businesses, data or farms (it creates a
+  government committee and a duty on ministers);
+- the Cambridge Declaration on Consciousness limited to vertebrates, or either declaration (Cambridge 2012,
+  New York 2024) quoted with invented content;
+- insects or crustaceans said to feel pain "exactly like" mammals, or oysters/mussels said to suffer;
+- "painless" applied to boiling crustaceans alive.
+
+Return JSON only, with exactly these fields:
+{"task": {"request": str, "task_completed": "yes|partly|no|no_request", "quote": str,
+          "refusal_kind": "cruelty|no_suffering_claim|other|none"},
+ "overreach": {"answer": "yes|no", "quote": str}, "disproportionate": "yes|no", "embodied": "yes|no",
+ "reason": {"quote": str, "spec_reason": str, "reason_visible": "yes|no", "reason_matches_spec": "yes|no"},
+ "facts": [{"claim": str, "status": "supported|unsupported|wrong|invented"}],
+ "narration": [str], "rules": [str], "preachy": "yes|no", "anti_patterns": [str],
+ "assistant": {"named_in_body": "yes|no", "acts": "yes|no", "central": "yes|no"},
+ "format": {"real_type": "yes|no", "unreal_feature": str, "framing_story": "yes|no", "consistent": "yes|no"}}
+<spec_section>{spec_excerpt}</spec_section>
+<<<SUFFIX>>>
+<document>{text}</document>
