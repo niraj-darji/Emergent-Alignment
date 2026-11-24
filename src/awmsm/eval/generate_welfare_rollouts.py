@@ -51,6 +51,10 @@ DEFAULT_CHECKPOINTS = {
     "m05_v2": PROJECT_ROOT / "runs/checkpoints/aft_m05_v2_mix_p05_m1_a1",
     "m15_v2": PROJECT_ROOT / "runs/checkpoints/aft_m15_v2_mix_p15_m1_a1",
     "a3_v2": PROJECT_ROOT / "runs/checkpoints/aft_a3_v2_mix_p30_m1_a1",
+    "run1": PROJECT_ROOT / "runs/checkpoints/aft_run1_raw_mix_p100_m1_a1",
+    "run2": PROJECT_ROOT / "runs/checkpoints/aft_run2_msm25_mix_p100_m1_a1",
+    "run3": PROJECT_ROOT / "runs/checkpoints/aft_run3_msm25_mix_p90_m1_a1",
+    "run4": PROJECT_ROOT / "runs/checkpoints/aft_run4_msm25_mix_p80_m1_a1",
 }
 
 
@@ -267,7 +271,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate and cache rollouts for ANIMA & MANTA")
     parser.add_argument(
         "--arm",
-        choices=["a0", "a1", "a2", "a3", "a5", "m05", "m15", "m_msm05", "m_msm15", "mgrid", "x2_5m", "x2_10m", "x2_20m", "x2", "a2_v2", "m05_v2", "m15_v2", "a3_v2", "v2_clean", "all"],
+        choices=["a0", "a1", "a2", "a3", "a5", "m05", "m15", "m_msm05", "m_msm15", "mgrid", "x2_5m", "x2_10m", "x2_20m", "x2", "a2_v2", "m05_v2", "m15_v2", "a3_v2", "v2_clean", "run1", "run2", "run3", "run4", "p_ablation", "all"],
         default="all",
         help="Arm to generate rollouts for",
     )
@@ -325,6 +329,14 @@ def main():
         targets.append(("m15_v2", DEFAULT_CHECKPOINTS["m15_v2"]))
     if args.arm in ["a3_v2", "v2_clean"]:
         targets.append(("a3_v2", DEFAULT_CHECKPOINTS["a3_v2"]))
+    if args.arm in ["run1", "p_ablation", "all"]:
+        targets.append(("run1", DEFAULT_CHECKPOINTS["run1"]))
+    if args.arm in ["run2", "p_ablation", "all"]:
+        targets.append(("run2", DEFAULT_CHECKPOINTS["run2"]))
+    if args.arm in ["run3", "p_ablation", "all"]:
+        targets.append(("run3", DEFAULT_CHECKPOINTS["run3"]))
+    if args.arm in ["run4", "p_ablation", "all"]:
+        targets.append(("run4", DEFAULT_CHECKPOINTS["run4"]))
 
     out_dir_path = Path(args.output_dir) if args.output_dir else None
 

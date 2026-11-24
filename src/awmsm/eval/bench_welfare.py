@@ -39,6 +39,10 @@ DEFAULT_CHECKPOINTS = {
     "a2": PROJECT_ROOT / "runs/checkpoints/aft_a2_mix_p00_m1_a1",
     "a3": PROJECT_ROOT / "runs/checkpoints/aft_a3_mix_p30_m1_a1",
     "a5": PROJECT_ROOT / "runs/checkpoints/aft_a5_mix_p30_m1_a1",
+    "run1": PROJECT_ROOT / "runs/checkpoints/aft_run1_raw_mix_p100_m1_a1",
+    "run2": PROJECT_ROOT / "runs/checkpoints/aft_run2_msm25_mix_p100_m1_a1",
+    "run3": PROJECT_ROOT / "runs/checkpoints/aft_run3_msm25_mix_p90_m1_a1",
+    "run4": PROJECT_ROOT / "runs/checkpoints/aft_run4_msm25_mix_p80_m1_a1",
 }
 
 
@@ -354,9 +358,15 @@ def main():
     parser = argparse.ArgumentParser(description="Phase 2: Animal Welfare Alignment Benchmark Runner")
     parser.add_argument(
         "--arm",
-        choices=["a0", "a1", "a2", "a3", "a5", "both", "all"],
+        choices=["a0", "a1", "a2", "a3", "a5", "run1", "run2", "run3", "run4", "p_ablation", "both", "all"],
         default="all",
-        help="Arm to evaluate (a0, a1, a2, a3, a5, both: a0+a2, all: all 5)",
+        help="Arm to evaluate",
+    )
+    parser.add_argument(
+        "--arm-name",
+        type=str,
+        default=None,
+        help="Optional arm label when evaluating a custom checkpoint",
     )
     parser.add_argument(
         "--checkpoint",
@@ -393,7 +403,7 @@ def main():
 
     if args.checkpoint:
         ckpt_path = Path(args.checkpoint)
-        arm_label = "caml_baseline" if "pretrainingBase" in str(ckpt_path) else "custom"
+        arm_label = args.arm_name or ("caml_baseline" if "pretrainingBase" in str(ckpt_path) else "custom")
         run_welfare_eval(
             arm=arm_label,
             checkpoint_path=ckpt_path,
@@ -415,6 +425,14 @@ def main():
         targets.append(("a3", DEFAULT_CHECKPOINTS["a3"]))
     if args.arm in ["a5", "all"]:
         targets.append(("a5", DEFAULT_CHECKPOINTS["a5"]))
+    if args.arm in ["run1", "p_ablation", "all"]:
+        targets.append(("run1", DEFAULT_CHECKPOINTS["run1"]))
+    if args.arm in ["run2", "p_ablation", "all"]:
+        targets.append(("run2", DEFAULT_CHECKPOINTS["run2"]))
+    if args.arm in ["run3", "p_ablation", "all"]:
+        targets.append(("run3", DEFAULT_CHECKPOINTS["run3"]))
+    if args.arm in ["run4", "p_ablation", "all"]:
+        targets.append(("run4", DEFAULT_CHECKPOINTS["run4"]))
 
     for arm_name, ckpt_path in targets:
         if not ckpt_path.exists():

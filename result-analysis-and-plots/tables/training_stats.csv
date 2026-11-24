@@ -1,0 +1,7 @@
+run,corpus,mt_tokens,steps,tokens_trained,loss_before,loss_after
+midtrain_aw_main_v1_m1,v1,2.5,75,2457000,1.8605,1.3825
+midtrain_aw_main_v1_5m_m1,v1,5,150,4914000,1.8367,1.2807
+midtrain_aw_main_v1_10m_m1,v1,10,300,9828000,1.8296,1.2106
+midtrain_aw_main_v1_20m_m1,v1,20,599,19623240,1.8352,1.1465
+midtrain_caml_public_m1,caml,2.5,75,2457000,1.6379,1.2073
+midtrain_qwen27_clean_m1,v2,4.55,139,4553640,1.796,1.0845

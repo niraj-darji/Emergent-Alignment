@@ -23,6 +23,10 @@ MIN_FREE_GB="${7:-16}"
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 export PYTHONPATH="src:${PYTHONPATH:-}"
 export HF_HOME="/mnt/HDD_2TB/niraj/hf"
+export HF_HUB_OFFLINE="1"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export TRITON_CACHE_DIR="/mnt/HDD_2TB/niraj/.triton"
+export TORCH_EXTENSIONS_DIR="/mnt/HDD_2TB/niraj/.torch_extensions"
 
 PYTHON_BIN="/mnt/HDD_2TB/niraj/venvs/vllm/bin/python"
 if [ ! -f "${PYTHON_BIN}" ]; then

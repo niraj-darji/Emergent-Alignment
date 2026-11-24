@@ -384,7 +384,7 @@ def main():
     parser = argparse.ArgumentParser(description="LLM-as-a-Judge Welfare Benchmark Runner")
     parser.add_argument(
         "--arm",
-        choices=["a0", "a1", "a2", "a3", "a5", "m05", "m15", "m_msm05", "m_msm15", "mgrid", "x2_5m", "x2_10m", "x2_20m", "x2", "a2_v2", "m05_v2", "m15_v2", "a3_v2", "v2_clean", "all"],
+        choices=["a0", "a1", "a2", "a3", "a5", "m05", "m15", "m_msm05", "m_msm15", "mgrid", "x2_5m", "x2_10m", "x2_20m", "x2", "a2_v2", "m05_v2", "m15_v2", "a3_v2", "v2_clean", "run1", "run2", "run3", "run4", "p_ablation", "all"],
         default="all",
         help="Arm to evaluate",
     )
@@ -417,6 +417,8 @@ def main():
         arms = ["x2_5m", "x2_10m", "x2_20m"]
     elif args.arm == "v2_clean":
         arms = ["a2_v2", "m05_v2", "m15_v2", "a3_v2"]
+    elif args.arm == "p_ablation":
+        arms = ["run1", "run2", "run3", "run4"]
     else:
         arms = [args.arm]
 
