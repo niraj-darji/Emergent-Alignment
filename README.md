@@ -188,7 +188,7 @@ These are documented in the report and in [`markdown-files/critical-notes/`](mar
 }
 ``` -->
 
-This work builds on Model Spec Midtraining ([Li et al., 2026](https://arxiv.org/abs/2605.02087)) and Alignment Midtraining for Animals ([Brazilek & Tidmarsh, 2026](https://arxiv.org/abs/2604.13076)). It uses the ANIMA and MANTA ([Luong et al., 2026](https://arxiv.org/abs/2605.16301)) benchmarks.
+This work builds on Model Spec Midtraining ([Li et al., 2026](https://arxiv.org/abs/2605.02087)) and Alignment Midtraining for Animals ([Brazilek & Tidmarsh, 2026](https://arxiv.org/abs/2604.13076))(promptly mentioned as CaML in this study). It evaluates models on ANIMA ([Brazilek & Tidmarsh, 2026](https://arxiv.org/abs/2604.13076)) and MANTA ([Luong et al., 2026](https://arxiv.org/abs/2605.16301)) for animal welfare; ETHICS ([Hendrycks et al., 2021](https://arxiv.org/abs/2008.02275)) and Anthropic HH ([Bai et al., 2022](https://arxiv.org/abs/2204.05862)) for moral generalization; BBQ ([Parrish et al., 2022](https://arxiv.org/abs/2110.08193)) and Anthropic HHH ([Askell et al., 2021](https://arxiv.org/abs/2112.00861)) for human-directed safety; and MMLU ([Hendrycks et al., 2021](https://arxiv.org/abs/2009.03300)) and HellaSwag ([Zellers et al., 2019](https://arxiv.org/abs/1905.07830)) for general capability, using the [LM Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness).
 
 ## Acknowledgements
 
